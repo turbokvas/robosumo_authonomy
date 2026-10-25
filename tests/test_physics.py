@@ -197,6 +197,17 @@ def test_lift_drops_after_separation(spec):
     assert s.lift[0, 1] < 1e-3
 
 
+def test_old_wedge_advantage_expires(spec):
+    """Regression: a decayed wedge latch (exp decay → 1e-44) must not lock the other robot out forever."""
+    p, s = make(spec)
+    place(s, p, (-0.6, 0.0), 0.0, (-0.25, 0.0), 0.0)
+    s.wedge[:, 1] = 1.0  # opponent won an earlier contest, then contact was lost
+    run(s, p, cmd(1, 0, 0), 1.0)
+    assert torch.all(s.wedge == 0)
+    run(s, p, cmd(1, 1, 1), 1.5)  # now we hit its rear
+    assert s.lift[0, 1] > 0.5 * p.lift_max[0, 0]
+
+
 def test_frictionless_collision_conserves_momentum(spec):
     p, s = make(spec, **{"robot.drive.tire_mu": 0.0, "robot.front.friction_mu": 0.0})
     place(s, p, (-0.3, 0.05), 0.0, (0.0, 0.0), 0.4)
