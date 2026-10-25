@@ -33,6 +33,7 @@ class Frame:
     centers: np.ndarray  # [R,2]
     theta: np.ndarray    # [R]
     out: np.ndarray      # [R] bool
+    lift: np.ndarray     # [R] share of wheel load taken by the opponent's wedge
 
 
 def robot_outline(center: np.ndarray, theta: float, half: tuple[float, float], wedge: float) -> np.ndarray:
@@ -55,7 +56,7 @@ def write_video(
 ) -> Path:
     """One subplot per episode, all played in sync."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    cols = min(len(episodes), 2)
+    cols = 2 if len(episodes) == 4 else min(len(episodes), 3)
     rows = math.ceil(len(episodes) / cols)
     fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 5 * rows), squeeze=False)
     fig.patch.set_facecolor("0.35")
@@ -86,7 +87,8 @@ def write_video(
                 for poly, i in zip(polys, draw_robots):
                     poly.set_xy(robot_outline(f.centers[i], float(f.theta[i]), half, wedge=0.04))
                     poly.set_facecolor("red" if f.out[i] else ROBOT_COLORS[i])
-                clock.set_text(f"t = {f.t:5.2f} s")
+                lifted = "  ".join(f"{c[4:]} lifted {f.lift[i]:.2f}" for i, c in enumerate(ROBOT_COLORS) if f.lift[i] > 0.01)
+                clock.set_text(f"t = {f.t:5.2f} s   {lifted}")
             writer.grab_frame()
     plt.close(fig)
     return path
@@ -102,11 +104,14 @@ def simulate(
     seconds: float,
     frame_dt: float,
     device: str = "cpu",
+    tweak: Callable[[physics.PhysParams], None] | None = None,
 ) -> tuple[list[list[Frame]], list[float]]:
-    """Run scripted scenarios (one env each) with nominal parameters and record frames."""
+    """Run scripted scenarios (one env each) with nominal parameters (optionally tweaked) and record frames."""
     n = len(starts)
     rand = sample_randomization(spec, n, device=device, randomize=False)
     p = physics.make_params(spec, rand)
+    if tweak is not None:
+        tweak(p)
     s = physics.zeros_state(n, device)
     center = torch.tensor([[a, b] for a, _, b, _ in starts], device=device, dtype=torch.float32)
     theta = torch.tensor([[ta, tb] for _, ta, _, tb in starts], device=device, dtype=torch.float32)
@@ -118,10 +123,11 @@ def simulate(
         t = k * p.dt
         if k % steps_per_frame == 0:
             ctr = physics.centers(s, p).cpu().numpy()
-            th = s.theta.cpu().numpy()
+            th = s.theta.cpu().numpy().copy()  # on CPU .numpy() shares memory with the live state
             out = physics.com_out_of_ring(s, p).cpu().numpy()
+            lift = s.lift.cpu().numpy().copy()
             for e in range(n):
-                episodes[e].append(Frame(t, ctr[e], th[e], out[e]))
+                episodes[e].append(Frame(t, ctr[e], th[e], out[e], lift[e]))
         pwm = torch.tensor([c(t) for c in commands], device=device, dtype=torch.float32)
         physics.step(s, p, pwm)
     return episodes, (p.ring_radius.cpu().tolist())
@@ -148,13 +154,21 @@ def demo(spec: dict, out_dir: Path) -> list[Path]:
     ]
     collide = [
         ("head-on, both full", ((-0.4, 0.0), 0.0, (0.4, 0.0), math.pi), lambda t: [[1, 1], [1, 1]]),
+        ("head-on, blue 12° off the line", ((-0.4, 0.0), math.radians(12), (0.4, 0.0), math.pi), lambda t: [[1, 1], [1, 1]]),
+        ("head-on, blue blade 1 mm lower", ((-0.4, 0.0), 0.0, (0.4, 0.0), math.pi), lambda t: [[1, 1], [1, 1]]),
         ("offset head-on (8 cm)", ((-0.4, 0.04), 0.0, (0.4, -0.04), math.pi), lambda t: [[1, 1], [1, 1]]),
         ("T-bone, opponent idle", ((-0.5, 0.0), 0.0, (0.1, 0.0), math.pi / 2), lambda t: [[1, 1], [0, 0]]),
         ("push from behind, opponent idle", ((-0.6, 0.0), 0.0, (-0.25, 0.0), 0.0), lambda t: [[1, 1], [0, 0]]),
     ]
+    def lower_blade(p: physics.PhysParams) -> None:
+        p.clearance[2, 0] -= 0.001  # scenario index 2: blue blade lower
+
     paths = []
-    for name, scen, seconds, robots in (("m1_drive", drive, 4.0, (0,)), ("m1_collisions", collide, 5.0, (0, 1))):
-        eps, radii = simulate(spec, [s for _, s, _ in scen], [c for _, _, c in scen], seconds, frame_dt)
+    for name, scen, seconds, robots, tweak in (
+        ("m1_drive", drive, 4.0, (0,), None),
+        ("m1_collisions", collide, 5.0, (0, 1), lower_blade),
+    ):
+        eps, radii = simulate(spec, [s for _, s, _ in scen], [c for _, _, c in scen], seconds, frame_dt, tweak=tweak)
         paths.append(write_video(eps, [t for t, _, _ in scen], radii, edge, half, out_dir / f"{name}.mp4", fps, robots))
     return paths
 

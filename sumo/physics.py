@@ -14,6 +14,9 @@ Model (PLAN.md, M1)
 - Tire / scoop / body friction: μ·N·tanh(|slip|/s₀) along −slip (smoothed Coulomb, friction circle in 2D).
 - Normal loads: static split of the weight between the axle and the scoop contact point.
 - Robot-robot: oriented boxes, SAT + face clipping (two-point manifold), penalty spring-damper + friction.
+- Wedge: a robot touching the opponent with its front can get under it and take part of the opponent's wheel
+  load onto its own scoop (state `lift`). Front into side/rear always gets under; front into front goes to whoever
+  came in at an angle, then to the lower blade (see `_update_lift`).
 - Integration: semi-implicit Euler; the wheel ODE is linearised-implicit for stability with stiff tire slip.
 """
 
@@ -56,6 +59,13 @@ class PhysParams:
     deadband: torch.Tensor       # [N,R]
     volt_ratio: torch.Tensor     # [N,R] V / V_nom
     j_wheel: float
+    lift_max: torch.Tensor       # [N,R] max share of the opponent's wheel load this robot's wedge can take
+    clearance: torch.Tensor      # [N,R] blade height above the ring
+    front_cos: float
+    angle_adv: float             # rad
+    clearance_adv: float
+    lift_alpha_up: float
+    lift_alpha_down: float
 
 
 @dataclass
@@ -66,6 +76,8 @@ class PhysState:
     omega: torch.Tensor          # [N,R]
     wheel_w: torch.Tensor        # [N,R,2] wheel angular speed, rad/s
     u_lag: torch.Tensor          # [N,R,2] motor command after deadband and lag
+    lift: torch.Tensor           # [N,R] share of this robot's wheel load carried by the opponent's wedge
+    wedge: torch.Tensor          # [N,R] how far this robot's wedge got under the opponent, 0..1 (latched)
 
     def clone(self) -> "PhysState":
         return PhysState(**{f.name: getattr(self, f.name).clone() for f in fields(self)})
@@ -112,8 +124,10 @@ def make_params(
         inv_inertia = torch.where(fixed, torch.zeros_like(inv_inertia), inv_inertia)
 
     contact = get(spec, "sim.contact")
+    wedge = get(spec, "sim.wedge")
+    dt = get(spec, "controller.physics_dt_s")
     return PhysParams(
-        dt=get(spec, "controller.physics_dt_s"),
+        dt=dt,
         s0=get(spec, "sim.slip_smoothing_vel"),
         half=half,
         k_contact=contact["stiffness"],
@@ -137,12 +151,19 @@ def make_params(
         deadband=rand["robot.motors.deadband_pwm"],
         volt_ratio=rand["robot.power.voltage"] / get(spec, "robot.power.nominal_v_for_motor_model"),
         j_wheel=motors["reflected_inertia_kgm2"],
+        lift_max=rand["robot.front.lift_fraction"],
+        clearance=rand["robot.front.clearance"],
+        front_cos=math.cos(math.radians(wedge["front_cone_deg"])),
+        angle_adv=math.radians(wedge["angle_advantage_deg"]),
+        clearance_adv=wedge["clearance_advantage"],
+        lift_alpha_up=1 - math.exp(-dt / wedge["lift_time_s"]),
+        lift_alpha_down=1 - math.exp(-dt / wedge["drop_time_s"]),
     )
 
 
 def zeros_state(n_envs: int, device: str | torch.device = "cpu") -> PhysState:
     z = lambda *s: torch.zeros(n_envs, N_ROBOTS, *s, device=device)  # noqa: E731
-    return PhysState(pos=z(2), theta=z(), vel=z(2), omega=z(), wheel_w=z(2), u_lag=z(2))
+    return PhysState(pos=z(2), theta=z(), vel=z(2), omega=z(), wheel_w=z(2), u_lag=z(2), lift=z(), wedge=z())
 
 
 def _rot(theta: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -194,6 +215,8 @@ def set_pose(
         omega=torch.zeros_like(state.omega),
         wheel_w=torch.zeros_like(state.wheel_w),
         u_lag=torch.zeros_like(state.u_lag),
+        lift=torch.zeros_like(state.lift),
+        wedge=torch.zeros_like(state.wedge),
     )
     for f in fields(state):
         cur, val = getattr(state, f.name), getattr(new, f.name)
@@ -276,6 +299,31 @@ def box_contacts(
     return pts, normal01, depth
 
 
+def _update_lift(state: PhysState, p: PhysParams, fwd: torch.Tensor, n01: torch.Tensor, touching: torch.Tensor) -> None:
+    """Who gets under whom, from the contact normal and both headings.
+
+    A robot can lift only when it touches with its front (normal within the front cone of its heading).
+    Front into side/rear: full lift. Front into front: advantage = (own misalignment − opponent's) / angle_adv
+    + (opponent's clearance − own) / clearance_adv, i.e. whoever came in at an angle, then the lower blade.
+    The result is latched: whoever got under at impact stays under while the front contact lasts, even after the
+    bodies swing flush (that happens within tens of ms), and the loser cannot get under the winner.
+    Lift ramps up while in contact and drops quickly once contact is lost.
+    """
+    n_out = torch.stack([n01, -n01], dim=1)  # [N,R,2] from each robot towards the other
+    cos = (n_out * fwd).sum(-1)
+    front = cos > p.front_cos
+    mis = torch.acos(cos.clamp(-1, 1))
+    adv = (mis - mis.flip(1)) / p.angle_adv + (p.clearance.flip(1) - p.clearance) / p.clearance_adv
+    share = torch.where(front.flip(1), adv.clamp(0, 1), torch.ones_like(adv))  # opponent's front too → contest
+    pushing = front & touching.unsqueeze(-1)
+    latched = torch.maximum(state.wedge, torch.where(state.wedge.flip(1) > 0, torch.zeros_like(share), share))
+    state.wedge.copy_(torch.where(pushing, latched, state.wedge * (1 - p.lift_alpha_down)))
+    by_me = torch.where(pushing, p.lift_max * state.wedge, torch.zeros_like(share))
+    target = by_me.flip(1)  # lift of each robot = what the other one's wedge achieves
+    alpha = torch.where(target > state.lift, p.lift_alpha_up, p.lift_alpha_down)
+    state.lift.add_(alpha * (target - state.lift))
+
+
 def step(
     state: PhysState,
     p: PhysParams,
@@ -303,7 +351,7 @@ def step(
     v_pt = _point_vel(state.vel.unsqueeze(-2), state.omega.unsqueeze(-1), arms)
     fwd_w = fwd.unsqueeze(-2)
     slip = v_pt - (state.wheel_w * p.wheel_r).unsqueeze(-1) * fwd_w
-    mu_n = (p.tire_mu * p.n_wheel).unsqueeze(-1).expand_as(state.wheel_w)
+    mu_n = (p.tire_mu * p.n_wheel * (1 - state.lift)).unsqueeze(-1).expand_as(state.wheel_w)
     f_tire = _friction(slip, mu_n, p.s0)  # on the robot
 
     # --- wheel speed: J·dω/dt = τ_m − F_long·r, linearised backward Euler, then worm-gear clamp
@@ -316,7 +364,8 @@ def step(
 
     # --- scoop sliding on the ring
     arm_s = (p.scoop_x - p.com_x).unsqueeze(-1) * fwd
-    f_scoop = _friction(_point_vel(state.vel, state.omega, arm_s), p.scoop_mu * p.n_scoop, p.s0)
+    carried = (2 * p.n_wheel * state.lift).flip(1)  # opponent's weight resting on this robot's wedge
+    f_scoop = _friction(_point_vel(state.vel, state.omega, arm_s), p.scoop_mu * (p.n_scoop + carried), p.s0)
 
     force = f_tire.sum(-2) + f_scoop
     torque = _cross(arms, f_tire).sum(-1) + _cross(arm_s, f_scoop)
@@ -336,6 +385,8 @@ def step(
     f_on_1 = fn.unsqueeze(-1) * n + _friction(vt, p.body_mu.unsqueeze(-1) * fn, p.s0)
     force = force + torch.stack([-f_on_1.sum(1), f_on_1.sum(1)], dim=1)
     torque = torque + torch.stack([-_cross(r0, f_on_1).sum(1), _cross(r1, f_on_1).sum(1)], dim=1)
+
+    _update_lift(state, p, fwd, n01, fn.sum(-1) > 0)
 
     # --- semi-implicit Euler
     state.vel.add_(dt * force * p.inv_mass.unsqueeze(-1))

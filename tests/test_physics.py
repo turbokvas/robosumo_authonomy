@@ -140,6 +140,61 @@ def test_head_on_collision_is_stable(spec):
     assert max(i["contact_depth"].max().item() for i in infos) < 0.01
     assert s.pos[0, :, 0].mean().abs() < 1e-3  # identical robots: deadlock in the middle
     assert s.vel.norm(dim=-1).max() < 0.02
+    assert s.lift.max() < 1e-3  # same angle, same blade height: nobody gets under
+
+
+def test_push_from_behind_lifts_idle_opponent(spec):
+    p, s = make(spec)
+    place(s, p, (-0.6, 0.0), 0.0, (-0.25, 0.0), 0.0)
+    x0 = s.pos[0, 1, 0].item()
+    run(s, p, cmd(1, 1, 1), 2.0)
+    assert s.lift[0, 1] > 0.9 * p.lift_max[0, 0]  # our wedge is under its rear
+    assert s.lift[0, 0] == 0
+    assert s.pos[0, 1, 0].item() - x0 > 0.5
+
+
+def test_t_bone_pushes_idle_opponent_sideways(spec):
+    p, s = make(spec)
+    place(s, p, (-0.5, 0.0), 0.0, (0.1, 0.0), math.pi / 2)
+    y0 = s.pos[0, 1, 0].item()
+    run(s, p, cmd(1, 1, 1), 2.0)
+    assert s.lift[0, 1] > 0.5 * p.lift_max[0, 0]
+    assert s.pos[0, 1, 0].item() - y0 > 0.3
+
+
+@pytest.mark.parametrize("angled", [0, 1])
+def test_head_on_whoever_comes_at_an_angle_gets_under(spec, angled):
+    """Both full throttle front to front; one robot is turned 12° off the line: it gets under and wins the push."""
+    p, s = make(spec)
+    tilt = math.radians(12)
+    th0, th1 = (tilt if angled == 0 else 0.0), (math.pi + (tilt if angled == 1 else 0.0))
+    place(s, p, (-0.25, 0.0), th0, (0.25, 0.0), th1)
+    run(s, p, cmd(1, 1, 1, 1, 1), 1.5)
+    other = 1 - angled
+    assert s.lift[0, other] > 0.5 * p.lift_max[0, angled]
+    assert s.lift[0, angled] < 1e-3
+    direction = 1 if angled == 0 else -1
+    assert direction * s.vel[0, other, 0] > 0.1  # loser is being pushed back
+
+
+def test_head_on_lower_blade_wins(spec):
+    p, s = make(spec)
+    p.clearance[:, 0] = 0.0
+    p.clearance[:, 1] = 0.002
+    place(s, p, (-0.25, 0.0), 0.0, (0.25, 0.0), math.pi)
+    run(s, p, cmd(1, 1, 1, 1, 1), 1.5)
+    assert s.lift[0, 1] > 0.5 * p.lift_max[0, 0]
+    assert s.lift[0, 0] < 1e-3
+    assert s.pos[0, 1, 0] > 0.3
+
+
+def test_lift_drops_after_separation(spec):
+    p, s = make(spec)
+    place(s, p, (-0.6, 0.0), 0.0, (-0.25, 0.0), 0.0)
+    run(s, p, cmd(1, 1, 1), 1.0)
+    assert s.lift[0, 1] > 0.3
+    run(s, p, cmd(1, -1, -1), 0.5)  # back off
+    assert s.lift[0, 1] < 1e-3
 
 
 def test_frictionless_collision_conserves_momentum(spec):
