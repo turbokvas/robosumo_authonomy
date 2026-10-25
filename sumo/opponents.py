@@ -8,7 +8,7 @@ Classic logic for 3 front E18 + 4 corner line sensors:
     ATTACK: centre E18 only → slight arc (attack_arc, side flips on every re-attack) so contact comes at an angle
             and the wedge gets under; side E18 → steer towards it; lost → keep turning
             towards the last seen side for `memory_s`, then SEARCH. Seeing it longer than attack_timeout
-            (a clinch: no encoders, so time is all the Nano has) → short back-off and turn, re-attack at an angle
+            (a clinch: no encoders, so time is all the MCU has) → short back-off and turn, re-attack at an angle
             (not for cautious_edge_waiter).
     SEARCH, per variant:
         aggressive            spin towards the last seen side, every burst_period a forward burst

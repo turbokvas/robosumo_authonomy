@@ -85,15 +85,15 @@ robot:
     battery_adc: true
 
 controller:
-  mcu: "Arduino Nano (ATmega328P, 16 MHz, 2 KB SRAM, 32 KB flash, no FPU)"
+  mcu: "TBD: ESP32 (мінімум) або STM32 F4/H7 (бажано), обидва з FPU"
   control_rate_hz: 100
   control_rate_rand_hz: [80, 120]  # джитер циклу
   physics_dt_s: 0.002
   policy:
     obs_frame_stack: 3
-    hidden: [32, 32]
+    hidden: [64, 64]               # стартова точка; підбирається за якістю
     activation: relu
-    quantization: int8             # ваги в PROGMEM, int32 акумулятор
+    precision: float32             # int8 лише якщо заміри на МК покажуть потребу
   action: "[u_left, u_right] in [-1, 1] → PWM"
   slew_limit_per_step: 0.25        # обмеження зміни PWM за цикл (є і в симі, і в прошивці)
 
@@ -111,7 +111,7 @@ arena:
   random_start_max_r: 0.5          # режим random: центри роботів у колі цього радіуса
 
 opponent:
-  hardware: "ідентичний робот (той самий корпус, мотори, Nano, сенсори)"
+  hardware: "ідентичний робот (той самий корпус, мотори, МК, сенсори)"
   brain: "хардкод FSM"             # чисто скриптований, без навчання: класична поведінка для 3 E18 + 4 лінії
   fsm: "SEARCH (крутиться/їде) → бачить ІЧ → ATTACK (прямо/доворот на бокові) → бачить край → ESCAPE (назад + розворот)"
   variants: [aggressive, cautious_edge_waiter, spinner, random_walker]

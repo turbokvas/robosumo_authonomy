@@ -1,7 +1,7 @@
 [project]
 name = "robosumo-rl"
 version = "0.1.0"
-description = "RL policy for a 3 kg robot sumo: batched 2D GPU sim, PPO, int8 export to Arduino Nano"
+description = "RL policy for a 3 kg robot sumo: batched 2D GPU sim, PPO, export to an ESP32/STM32 robot"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "torch>=2.7",

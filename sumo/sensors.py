@@ -1,4 +1,4 @@
-"""Sensors as the Nano sees them: 3× E18-D80NK (digital beams), 4 edge line sensors, battery ADC.
+"""Sensors as the robot's MCU sees them: 3× E18-D80NK (digital beams), 4 edge line sensors, battery ADC.
 
 Geometry is sampled every physics substep into a short history; reads at the control tick pick each robot's
 own latency out of it, then apply E18 noise (false negatives/positives, crosstalk from the opponent's identical E18).
