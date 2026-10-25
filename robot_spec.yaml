@@ -1,0 +1,102 @@
+# Єдине джерело правди для симу, тренування і прошивки.
+# Усі одиниці — SI (м, кг, с, рад, Н, Н·м), якщо не вказано інше.
+# Поля з "rand" — діапазони для domain randomization (рівномірний розподіл).
+
+robot:
+  class: "3kg robot sumo"
+  mass: 3.0
+  mass_rand: [2.85, 3.0]
+  footprint: [0.200, 0.200]        # довжина x ширина
+  height: 0.130
+  # Система координат робота: x — вперед, y — вліво, початок — геометричний центр корпусу.
+  com_x_from_axle: 0.02            # ЦМ на ~2 см попереду осі коліс
+  com_x_from_axle_rand: [0.01, 0.035]
+  yaw_inertia: null                # TODO: оцінити з Fusion (Inspect → Properties); поки ~ m*(a²+b²)/12
+
+  front:
+    type: wedge                    # клин/лопата, ковзає по рингу
+    contact_x: 0.100               # точка опори лопати від центру
+    friction_mu: 0.3               # тертя лопати по рингу
+    friction_mu_rand: [0.15, 0.5]
+
+  drive:
+    layout: "diff drive, 2 rear wheels"
+    wheel_diameter: 0.070
+    wheel_width: 0.050
+    track_width: 0.150             # центр-центр: зазор 10 см + 2×(5 см / 2)
+    axle_x: -0.060                 # TODO: уточнити по моделі (колеса позаду)
+    tire_mu: 0.9
+    tire_mu_rand: [0.6, 1.1]
+
+  motors:
+    model: "JGY-370 worm gear, 1:40, 160 rpm @12V"
+    datasheet_12v: {no_load_rpm: 160, stall_torque_kgcm: 6.4, stall_current_a: 2.0}
+    # Оцінка на 16 В (лінійне масштабування ×1.33). ЗАМІРЯТИ на реальному залізі.
+    est_16v: {no_load_rpm: 213, stall_torque_nm: 0.84, stall_current_a: 2.7}
+    strength_rand: [0.7, 1.15]     # множник на момент (розкид між моторами, нагрів)
+    left_right_mismatch_rand: [0.9, 1.1]
+    self_locking: true             # черв'як: зовнішня сила не провертає колесо
+    deadband_pwm_rand: [0.05, 0.15]
+    time_constant_s_rand: [0.02, 0.06]
+    encoders: false                # TODO: рекомендовано поставити (версії JGY-370 з енкодером існують)
+
+  power:
+    battery: "4S LiPo"
+    voltage_rand: [14.0, 16.8]
+    nominal_v_for_motor_model: 16.0
+
+  sensors:
+    opponent_ir:
+      model: "E18-D80NK (digital, NPN, active-low, 5 V)"
+      count: 3
+      # [x, y, кут у градусах] від центру корпусу; кут + — вліво
+      mounts:
+        - [0.100,  0.060,  15.0]
+        - [0.100,  0.000,   0.0]
+        - [0.100, -0.060, -15.0]
+      range: 1.0                   # бажана дальність у симі
+      range_rand: [0.6, 1.0]       # реальний E18 зазвичай до ~0.8 м
+      beam_half_angle_deg: 3.0     # промінь з невеликим конусом
+      latency_s_rand: [0.002, 0.010]
+      false_negative_p: 0.03
+      false_positive_p: 0.005
+      crosstalk: true              # однакові E18 на суперникові можуть засвітити наші
+    edge:
+      count: 4
+      mounts:                      # кути квадрата 170×170 мм по центру корпусу
+        - [ 0.085,  0.085]
+        - [ 0.085, -0.085]
+        - [-0.085,  0.085]
+        - [-0.085, -0.085]
+      latency_s_rand: [0.001, 0.005]
+    battery_adc: true
+
+controller:
+  mcu: "Arduino Nano (ATmega328P, 16 MHz, 2 KB SRAM, 32 KB flash, no FPU)"
+  control_rate_hz: 100
+  control_rate_rand_hz: [80, 120]  # джитер циклу
+  physics_dt_s: 0.002
+  policy:
+    obs_frame_stack: 3
+    hidden: [32, 32]
+    activation: relu
+    quantization: int8             # ваги в PROGMEM, int32 акумулятор
+  action: "[u_left, u_right] in [-1, 1] → PWM"
+  slew_limit_per_step: 0.25        # обмеження зміни PWM за цикл (є і в симі, і в прошивці)
+
+arena:
+  ring_diameter: 1.54              # TODO: реальне дохьо (може бути більше)
+  ring_diameter_rand: [1.54, 1.80]
+  edge_line_width: 0.05
+  start_modes: [face_to_face, side_by_side, back_to_back, random]
+
+opponent:
+  hardware: "ідентичний робот (той самий корпус, мотори, Nano, сенсори)"
+  brain: "хардкод FSM"
+  fsm: "SEARCH (крутиться/їде) → бачить ІЧ → ATTACK (прямо/доворот на бокові) → бачить край → ESCAPE (назад + розворот)"
+  variants: [aggressive, cautious_edge_waiter, spinner, random_walker]
+  params_rand: true                # швидкості, кути, таймінги FSM рандомізуються
+
+match:
+  timeout_s: 20
+  start_delay_s: 0                 # у реальних правилах 5 с — відтворює прошивка

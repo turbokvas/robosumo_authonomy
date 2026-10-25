@@ -1,0 +1,31 @@
+[project]
+name = "robosumo-rl"
+version = "0.1.0"
+description = "RL policy for a 3 kg robot sumo: batched 2D GPU sim, PPO, int8 export to Arduino Nano"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "torch>=2.7",
+    "numpy",
+    "pyyaml",
+    "tensorboard",
+    "matplotlib",
+    "pygame",
+]
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
