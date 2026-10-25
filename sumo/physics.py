@@ -31,6 +31,7 @@ import torch
 from sumo.config import RandomizationBatch, get
 
 N_ROBOTS = 2
+WEDGE_EPS = 1e-3  # below this a decaying wedge advantage counts as gone
 
 
 @dataclass
@@ -64,8 +65,8 @@ class PhysParams:
     front_cos: float
     angle_adv: float             # rad
     clearance_adv: float
-    lift_alpha_up: float
-    lift_alpha_down: float
+    lift_time: float
+    drop_time: float
 
 
 @dataclass
@@ -156,8 +157,8 @@ def make_params(
         front_cos=math.cos(math.radians(wedge["front_cone_deg"])),
         angle_adv=math.radians(wedge["angle_advantage_deg"]),
         clearance_adv=wedge["clearance_advantage"],
-        lift_alpha_up=1 - math.exp(-dt / wedge["lift_time_s"]),
-        lift_alpha_down=1 - math.exp(-dt / wedge["drop_time_s"]),
+        lift_time=wedge["lift_time_s"],
+        drop_time=wedge["drop_time_s"],
     )
 
 
@@ -299,16 +300,23 @@ def box_contacts(
     return pts, normal01, depth
 
 
-def _update_lift(state: PhysState, p: PhysParams, fwd: torch.Tensor, n01: torch.Tensor, touching: torch.Tensor) -> None:
+def _update_lift(
+    state: PhysState, p: PhysParams, fwd: torch.Tensor, n01: torch.Tensor, touching: torch.Tensor, dt2: torch.Tensor | float
+) -> None:
     """Who gets under whom, from the contact normal and both headings.
 
     A robot can lift only when it touches with its front (normal within the front cone of its heading).
     Front into side/rear: full lift. Front into front: advantage = (own misalignment − opponent's) / angle_adv
     + (opponent's clearance − own) / clearance_adv, i.e. whoever came in at an angle, then the lower blade.
-    The result is latched: whoever got under at impact stays under while the front contact lasts, even after the
-    bodies swing flush (that happens within tens of ms), and the loser cannot get under the winner.
-    Lift ramps up while in contact and drops quickly once contact is lost.
+    The advantage is latched: whoever got under at impact stays under while the front contact lasts, even after
+    the bodies swing flush (that happens within tens of ms), and the loser cannot get under the winner.
+    The winner works the blade under towards lift_max while pushing; the advantage sets how fast
+    (full advantage → lift_time, a tenth of it → 10× slower). Lift drops quickly once contact is lost.
     """
+    if isinstance(dt2, torch.Tensor):
+        down = 1 - torch.exp(-dt2 / p.drop_time)
+    else:
+        down = 1 - math.exp(-dt2 / p.drop_time)
     n_out = torch.stack([n01, -n01], dim=1)  # [N,R,2] from each robot towards the other
     cos = (n_out * fwd).sum(-1)
     front = cos > p.front_cos
@@ -317,10 +325,13 @@ def _update_lift(state: PhysState, p: PhysParams, fwd: torch.Tensor, n01: torch.
     share = torch.where(front.flip(1), adv.clamp(0, 1), torch.ones_like(adv))  # opponent's front too → contest
     pushing = front & touching.unsqueeze(-1)
     latched = torch.maximum(state.wedge, torch.where(state.wedge.flip(1) > 0, torch.zeros_like(share), share))
-    state.wedge.copy_(torch.where(pushing, latched, state.wedge * (1 - p.lift_alpha_down)))
-    by_me = torch.where(pushing, p.lift_max * state.wedge, torch.zeros_like(share))
+    decayed = state.wedge * (1 - down)
+    decayed = torch.where(decayed < WEDGE_EPS, torch.zeros_like(decayed), decayed)  # exp decay never hits 0
+    state.wedge.copy_(torch.where(pushing, latched, decayed))
+    by_me = torch.where(pushing & (state.wedge > 0), p.lift_max, torch.zeros_like(share))
     target = by_me.flip(1)  # lift of each robot = what the other one's wedge achieves
-    alpha = torch.where(target > state.lift, p.lift_alpha_up, p.lift_alpha_down)
+    up = 1 - torch.exp(-dt2 * state.wedge.flip(1) / p.lift_time)
+    alpha = torch.where(target > state.lift, up, down)
     state.lift.add_(alpha * (target - state.lift))
 
 
@@ -329,16 +340,23 @@ def step(
     p: PhysParams,
     pwm: torch.Tensor,
     ext_force: torch.Tensor | None = None,
+    dt: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
-    """Advance one physics step (dt) in place. pwm: [N,R,2] in [-1, 1]. ext_force: [N,R,2] at the CoM (tests)."""
-    dt = p.dt
+    """Advance one physics step in place. pwm: [N,R,2] in [-1, 1]. ext_force: [N,R,2] at the CoM (tests).
+
+    dt: per-env step [N] (control-loop jitter: each env splits its own control period into substeps); default p.dt.
+    """
+    if dt is None:
+        dt2 = dt3 = p.dt
+    else:
+        dt2, dt3 = dt.view(-1, 1), dt.view(-1, 1, 1)
     fwd, left = _rot(state.theta)
 
     # --- motor: deadband → first-order lag → torque-speed line
     u = pwm.clamp(-1, 1)
     db = p.deadband.unsqueeze(-1)
     u_m = torch.sign(u) * ((u.abs() - db) / (1 - db)).clamp(min=0)
-    alpha = (1 - torch.exp(-dt / p.motor_tc)).unsqueeze(-1)
+    alpha = (1 - torch.exp(-dt2 / p.motor_tc)).unsqueeze(-1)
     state.u_lag.add_(alpha * (u_m - state.u_lag))
     drive = state.u_lag * p.volt_ratio.unsqueeze(-1)
     b = p.tau_stall / p.omega0
@@ -358,7 +376,7 @@ def step(
     f_long = (f_tire * fwd_w).sum(-1)
     slip_mag = slip.norm(dim=-1)
     k_t = mu_n * p.wheel_r**2 / p.s0 * (1 - torch.tanh(slip_mag / p.s0) ** 2)
-    w_new = state.wheel_w + dt * (tau_m - f_long * p.wheel_r) / (p.j_wheel + dt * (b + k_t))
+    w_new = state.wheel_w + dt3 * (tau_m - f_long * p.wheel_r) / (p.j_wheel + dt3 * (b + k_t))
     w_free = drive * p.omega0
     state.wheel_w.copy_(torch.clamp(w_new, torch.minimum(w_free, torch.zeros_like(w_free)), torch.maximum(w_free, torch.zeros_like(w_free))))
 
@@ -386,12 +404,12 @@ def step(
     force = force + torch.stack([-f_on_1.sum(1), f_on_1.sum(1)], dim=1)
     torque = torque + torch.stack([-_cross(r0, f_on_1).sum(1), _cross(r1, f_on_1).sum(1)], dim=1)
 
-    _update_lift(state, p, fwd, n01, fn.sum(-1) > 0)
+    _update_lift(state, p, fwd, n01, fn.sum(-1) > 0, dt2)
 
     # --- semi-implicit Euler
-    state.vel.add_(dt * force * p.inv_mass.unsqueeze(-1))
-    state.omega.add_(dt * torque * p.inv_inertia)
-    state.pos.add_(dt * state.vel)
-    state.theta.add_(dt * state.omega)
+    state.vel.add_(dt3 * force * p.inv_mass.unsqueeze(-1))
+    state.omega.add_(dt2 * torque * p.inv_inertia)
+    state.pos.add_(dt3 * state.vel)
+    state.theta.add_(dt2 * state.omega)
 
     return {"contact_normal_force": fn.sum(-1), "tire_force": f_tire, "contact_depth": depth.amax(-1)}

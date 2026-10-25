@@ -52,6 +52,7 @@ robot:
     battery: "4S LiPo"
     voltage_rand: [14.0, 16.8]
     nominal_v_for_motor_model: 16.0
+    full_v: 16.8                   # battery ADC у спостереженнях = V / full_v
 
   sensors:
     opponent_ir:
@@ -69,6 +70,10 @@ robot:
       false_negative_p: 0.03
       false_positive_p: 0.005
       crosstalk: true              # однакові E18 на суперникові можуть засвітити наші
+      # Кросток: наш датчик спрацьовує, якщо випромінювач суперника в нашому полі зору і світить на нас.
+      crosstalk_cone_deg: 20.0     # кут прийому нашого датчика і кут випромінювання чужого
+      crosstalk_range: 1.5         # м: далі засвітка вже не пробиває поріг
+      crosstalk_p: 0.3             # ймовірність хибного спрацювання за цикл, коли умови виконані
     edge:
       count: 4
       mounts:                      # кути квадрата 170×170 мм по центру корпусу
@@ -99,6 +104,11 @@ arena:
   surface_color: white             # нестандартно: центр білий, окантовка чорна
   edge_line_color: black           # line-сенсор у симі: 1 = над окантовкою (чорним)
   start_modes: [face_to_face, side_by_side, back_to_back, random]
+  start_center_dist: 0.25          # м від центру рингу до центру робота у фіксованих стартах
+  start_center_dist_rand: [0.2, 0.3]
+  start_jitter_pos: 0.02           # м, шум позиції на старті
+  start_jitter_deg: 10.0           # шум курсу на старті
+  random_start_max_r: 0.5          # режим random: центри роботів у колі цього радіуса
 
 opponent:
   hardware: "ідентичний робот (той самий корпус, мотори, Nano, сенсори)"
@@ -106,6 +116,22 @@ opponent:
   fsm: "SEARCH (крутиться/їде) → бачить ІЧ → ATTACK (прямо/доворот на бокові) → бачить край → ESCAPE (назад + розворот)"
   variants: [aggressive, cautious_edge_waiter, spinner, random_walker]
   params_rand: true                # швидкості, кути, таймінги FSM рандомізуються
+  fsm:                             # діапазони параметрів FSM (рандомізуються на кожен матч), PWM у [0, 1]
+    attack_speed_rand: [0.75, 1.0]
+    steer_inner_rand: [0.0, 0.5]   # швидкість внутрішнього колеса відносно зовнішнього, коли бачить боковим ІЧ
+    search_spin_rand: [0.3, 0.6]
+    memory_s_rand: [0.1, 0.4]      # скільки ще доварчує в бік, де бачив суперника
+    escape_speed_rand: [0.6, 1.0]
+    escape_back_s_rand: [0.15, 0.35]
+    escape_turn_s_rand: [0.15, 0.4]
+    burst_period_s_rand: [0.6, 1.5] # aggressive: як часто пошук переривається ривком уперед
+    burst_s_rand: [0.15, 0.4]
+    wander_period_s_rand: [0.3, 1.0] # random_walker: як часто міняє випадкову команду
+    cautious_scale_rand: [0.4, 0.7] # cautious: множник на швидкості атаки і пошуку
+    attack_arc_rand: [0.1, 0.35]   # бачить лише центром → внутрішнє колесо на (1−arc): заходить під кутом
+    attack_timeout_s_rand: [1.0, 2.5] # клінч довше цього → відкат і новий заїзд під кутом (не для cautious)
+    reposition_back_s_rand: [0.1, 0.25]
+    reposition_turn_s_rand: [0.06, 0.15]
 
 sim:
   # Параметри чисельної моделі, яких немає на залізі.

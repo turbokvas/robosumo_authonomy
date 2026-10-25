@@ -62,6 +62,8 @@ runs/              # чекпоінти + конфіг + git hash (в .gitignore
 ## Команди (заповнювати по мірі появи)
 - `uv run pytest` (`-s`, щоб побачити заміряну швидкість фізики)
 - `uv run python -m sumo.render --demo` — відео-перевірка фізики в `runs/videos/`
+- `uv run python -m sumo.match --a aggressive --b random_walker --n 4096 [--nominal] [--video 6]` — FSM проти FSM
+- `uv run python -m sumo.match --matrix --n 1024 --nominal` — матриця win-rate усіх варіантів FSM
 - `uv run python -m train.ppo --config ...`
 - `uv run python -m train.eval --ckpt ...`
 - `uv run python -m export.gen_header --ckpt ...`
