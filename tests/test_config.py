@@ -20,7 +20,7 @@ def test_rand_names(spec):
     names = rand_ranges(spec)
     assert names["robot.mass"] == (2.85, 3.0)
     assert names["controller.control_rate_hz"] == (80.0, 120.0)
-    assert names["arena.ring_diameter"] == (1.54, 1.80)
+    assert names["arena.ring_diameter"] == (1.55, 1.65)
     assert "robot.sensors.opponent_ir.latency_s" in names
     assert "opponent.params" not in names  # bool flag, not a range
 
@@ -61,7 +61,7 @@ def test_nominal(spec):
 
 def test_partial_randomize_and_resample(spec):
     batch = sample_randomization(spec, 16, randomize={"robot.mass"}, generator=torch.Generator().manual_seed(3))
-    assert torch.all(batch["arena.ring_diameter"] == 1.54)
+    assert torch.all(batch["arena.ring_diameter"] == 1.60)  # base field, not the range
     fresh = sample_randomization(spec, 16, generator=torch.Generator().manual_seed(4))
     mask = torch.zeros(16, dtype=torch.bool)
     mask[:4] = True
