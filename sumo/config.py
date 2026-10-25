@@ -79,7 +79,7 @@ class RandomizationBatch:
         """Copy values from `other` into envs where env_mask is True (used on env reset)."""
         for name, value in self.params.items():
             mask = env_mask.view(-1, *([1] * (value.dim() - 1)))
-            self.params[name] = torch.where(mask, other.params[name], value)
+            value.copy_(torch.where(mask, other.params[name], value))  # in place: views and CUDA graphs stay valid
 
 
 def sample_randomization(

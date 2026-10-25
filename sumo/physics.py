@@ -31,6 +31,15 @@ import torch
 from sumo.config import RandomizationBatch, get
 
 N_ROBOTS = 2
+_CONSTS: dict[tuple, torch.Tensor] = {}
+
+
+def const(values: tuple[float, ...], device: torch.device, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+    """Small constant tensor, created once per device. Keeps hot paths free of host→device copies (CUDA graphs)."""
+    key = (values, str(device), dtype)
+    if key not in _CONSTS:
+        _CONSTS[key] = torch.tensor(values, device=device, dtype=dtype)
+    return _CONSTS[key]
 WEDGE_EPS = 1e-3  # below this a decaying wedge advantage counts as gone
 
 
@@ -162,6 +171,16 @@ def make_params(
     )
 
 
+def copy_params_(dst: PhysParams, src: PhysParams) -> None:
+    """Overwrite dst in place (tensors keep their storage, so captured CUDA graphs see the new values)."""
+    for f in fields(dst):
+        a, b = getattr(dst, f.name), getattr(src, f.name)
+        if isinstance(a, torch.Tensor):
+            a.copy_(b)
+        elif a != b:
+            raise ValueError(f"non-tensor parameter {f.name} changed: {a} → {b}")
+
+
 def zeros_state(n_envs: int, device: str | torch.device = "cpu") -> PhysState:
     z = lambda *s: torch.zeros(n_envs, N_ROBOTS, *s, device=device)  # noqa: E731
     return PhysState(pos=z(2), theta=z(), vel=z(2), omega=z(), wheel_w=z(2), u_lag=z(2), lift=z(), wedge=z())
@@ -241,7 +260,7 @@ def box_contacts(
     c: centres [N,2,2], theta [N,2].
     Returns points [N,2,2] (world), normal [N,2] pointing from box 0 to box 1, depth [N,2] (0 = no contact).
     """
-    h = torch.tensor(half, device=c.device, dtype=c.dtype)  # [2]
+    h = const(tuple(half), c.device, c.dtype)  # [2]
     fwd, left = _rot(theta)
     axes = torch.stack([fwd, left], dim=2)  # [N,box,axis,2]
 
@@ -364,7 +383,7 @@ def step(
 
     # --- tires, wheel contact arms relative to the CoM: [N,R,2(wheel),2]
     arm_x = (p.axle_x - p.com_x).unsqueeze(-1)
-    arm_y = torch.tensor([p.half_track, -p.half_track], device=pwm.device)
+    arm_y = const((p.half_track, -p.half_track), pwm.device)
     arms = arm_x.unsqueeze(-1) * fwd.unsqueeze(-2) + arm_y.view(1, 1, 2, 1) * left.unsqueeze(-2)
     v_pt = _point_vel(state.vel.unsqueeze(-2), state.omega.unsqueeze(-1), arms)
     fwd_w = fwd.unsqueeze(-2)

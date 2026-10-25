@@ -3,6 +3,8 @@
 One `step` = one control period of each env (jittered rate from the spec), split into a fixed number of physics
 substeps, so envs stay in lockstep while their control periods differ. Actions go through the firmware's slew limit.
 Match rules: CoM out of the ring loses; both out on the same tick or timeout → draw.
+On CUDA the substep block (physics + sensor history) is captured once as a CUDA graph and replayed: the sim is
+launch-bound otherwise. Everything the graph touches is updated in place (params, randomization, actions).
 M2 scope: readings + match outcome. Observations and rewards for RL come in M3.
 """
 
@@ -29,6 +31,7 @@ class SumoEnv:
         randomize: bool | set[str] = True,
         start_modes: list[str] | None = None,
         seed: int | None = None,
+        use_graph: bool = True,
     ):
         self.spec, self.n, self.device, self.randomize = spec, num_envs, device, randomize
         self.gen = torch.Generator(device=device)
@@ -53,6 +56,8 @@ class SumoEnv:
         self.t = z()
         self.action = z(physics.N_ROBOTS, 2)
         self.start_mode = z(dtype=torch.long)
+        self.use_graph = use_graph and torch.device(device).type == "cuda"
+        self._graph: torch.cuda.CUDAGraph | None = None
         self.reset()
 
     @property
@@ -106,8 +111,7 @@ class SumoEnv:
             return
         fresh = sample_randomization(self.spec, self.n, device=self.device, generator=self.gen, randomize=self.randomize)
         self.rand.resample(fresh, m)
-        self.p = physics.make_params(self.spec, self.rand)
-        self.sensors.set_params(self.rand)
+        physics.copy_params_(self.p, physics.make_params(self.spec, self.rand))
 
         allowed = torch.tensor([self.all_modes.index(s) for s in self.start_modes], device=self.device)
         modes = allowed[torch.randint(len(allowed), (k,), device=self.device, generator=self.gen)]
@@ -123,14 +127,42 @@ class SumoEnv:
     def readings(self) -> dict[str, torch.Tensor]:
         return self.sensors.read(self.ctrl_dt / self.substeps)
 
-    def step(self, action: torch.Tensor) -> tuple[dict[str, torch.Tensor], torch.Tensor, torch.Tensor]:
-        """action [N,R,2] in [-1, 1] → (readings, done [N], winner [N]: 0/1 or DRAW). No auto-reset."""
-        self.action = self.action + (action.clamp(-1, 1) - self.action).clamp(-self.slew, self.slew)
+    def _substeps(self) -> None:
         dt = self.ctrl_dt / self.substeps
         for _ in range(self.substeps):
             physics.step(self.state, self.p, self.action, dt=dt)
             self.sensors.push(self.state, self.p)
-        self.t += self.ctrl_dt
+        self.t.add_(self.ctrl_dt)
+
+    def _sim_tensors(self) -> list[torch.Tensor]:
+        st = self.state
+        return [st.pos, st.theta, st.vel, st.omega, st.wheel_w, st.u_lag, st.lift, st.wedge,
+                self.sensors.hist, self.sensors.head, self.t]
+
+    def _capture(self) -> None:
+        """Warm up on a side stream, capture `_substeps`, then roll the sim back to where it was."""
+        saved = [x.clone() for x in self._sim_tensors()]
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side):
+            for _ in range(3):
+                self._substeps()
+        torch.cuda.current_stream().wait_stream(side)
+        self._graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self._graph):
+            self._substeps()
+        for x, s in zip(self._sim_tensors(), saved):
+            x.copy_(s)
+
+    def step(self, action: torch.Tensor) -> tuple[dict[str, torch.Tensor], torch.Tensor, torch.Tensor]:
+        """action [N,R,2] in [-1, 1] → (readings, done [N], winner [N]: 0/1 or DRAW). No auto-reset."""
+        self.action.add_((action.clamp(-1, 1) - self.action).clamp(-self.slew, self.slew))
+        if self.use_graph:
+            if self._graph is None:
+                self._capture()
+            self._graph.replay()
+        else:
+            self._substeps()
 
         out = physics.com_out_of_ring(self.state, self.p)
         lost = out.any(-1)

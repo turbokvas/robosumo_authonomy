@@ -72,3 +72,21 @@ def test_aggressive_beats_random_walker(spec):
     r = run_matches(spec, "aggressive", "random_walker", 2048, "cuda", seed=0, randomize=False)
     print(f"\naggressive vs random_walker: {r['a_wins']:.1%} wins, {r['draws']:.1%} draws")
     assert r["a_wins"] > 0.8
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA graphs need CUDA")
+def test_cuda_graph_matches_eager(spec):
+    """The captured substep block must give the same trajectory as eager execution, across resets."""
+    envs = [SumoEnv(spec, 64, "cuda", seed=7, use_graph=g) for g in (False, True)]
+    gen = torch.Generator("cuda").manual_seed(1)
+    for k in range(150):
+        action = torch.rand(64, 2, 2, device="cuda", generator=gen) * 2 - 1
+        outs = [e.step(action) for e in envs]
+        if k % 50 == 49:
+            mask = torch.arange(64, device="cuda") % 3 == 0
+            for e in envs:
+                e.reset(mask)
+    a, b = envs
+    for x, y in zip(a._sim_tensors(), b._sim_tensors()):
+        assert torch.allclose(x.float(), y.float(), atol=1e-5)
+    assert torch.equal(outs[0][1], outs[1][1])
