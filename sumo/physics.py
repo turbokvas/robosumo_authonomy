@@ -181,6 +181,16 @@ def copy_params_(dst: PhysParams, src: PhysParams) -> None:
             raise ValueError(f"non-tensor parameter {f.name} changed: {a} → {b}")
 
 
+def scatter_params_(dst: PhysParams, subset: PhysParams, env_idx: torch.Tensor) -> None:
+    """Write params computed for the envs `env_idx` (long) only into those envs of dst, in place."""
+    for f in fields(dst):
+        a, b = getattr(dst, f.name), getattr(subset, f.name)
+        if isinstance(a, torch.Tensor):
+            a.index_copy_(0, env_idx, b)
+        elif a != b:
+            raise ValueError(f"non-tensor parameter {f.name} changed: {a} → {b}")
+
+
 def zeros_state(n_envs: int, device: str | torch.device = "cpu") -> PhysState:
     z = lambda *s: torch.zeros(n_envs, N_ROBOTS, *s, device=device)  # noqa: E731
     return PhysState(pos=z(2), theta=z(), vel=z(2), omega=z(), wheel_w=z(2), u_lag=z(2), lift=z(), wedge=z())

@@ -75,6 +75,11 @@ class RandomizationBatch:
     def __getitem__(self, name: str) -> torch.Tensor:
         return self.params[name]
 
+    def scatter_(self, subset: "RandomizationBatch", env_idx: torch.Tensor) -> None:
+        """Write a batch sampled for the envs `env_idx` (long, len = subset size) into those envs, in place."""
+        for name, value in self.params.items():
+            value.index_copy_(0, env_idx, subset.params[name])
+
     def resample(self, other: "RandomizationBatch", env_mask: torch.Tensor) -> None:
         """Copy values from `other` into envs where env_mask is True (used on env reset)."""
         for name, value in self.params.items():

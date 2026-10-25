@@ -74,29 +74,25 @@ class SumoEnv:
         x = torch.stack([-dist, dist], -1)
         center = torch.stack([x, torch.zeros_like(x)], -1)
         pi = math.pi
-        th = torch.zeros(k, 2, device=self.device)
-        th = torch.where((modes == name("face_to_face")).unsqueeze(-1), torch.tensor([0.0, pi], device=self.device), th)
-        th = torch.where((modes == name("back_to_back")).unsqueeze(-1), torch.tensor([pi, 0.0], device=self.device), th)
-        th = torch.where((modes == name("side_by_side")).unsqueeze(-1), torch.tensor([pi / 2, pi / 2], device=self.device), th)
+        dev = self.device
+        th = torch.zeros(k, 2, device=dev)
+        th = torch.where((modes == name("face_to_face")).unsqueeze(-1), physics.const((0.0, pi), dev), th)
+        th = torch.where((modes == name("back_to_back")).unsqueeze(-1), physics.const((pi, 0.0), dev), th)
+        th = torch.where((modes == name("side_by_side")).unsqueeze(-1), physics.const((pi / 2, pi / 2), dev), th)
 
-        # random: uniform in a disc, re-drawn until the two robots are clear of each other
-        rnd = modes == name("random")
-        if rnd.any():
-            n_r = int(rnd.sum())
-            pos = torch.zeros(n_r, 2, 2, device=self.device)
-            todo = torch.ones(n_r, dtype=torch.bool, device=self.device)
-            # bounding circles apart for any headings, with room for the position jitter added below
-            min_gap = 2 * math.hypot(*self.half) + 2 * math.hypot(self.jitter_pos, self.jitter_pos) + 0.01
-            for _ in range(50):
-                idx = todo.nonzero().squeeze(-1)
-                if idx.numel() == 0:
-                    break
-                r = self.random_r * self._rand(idx.numel(), 2).sqrt()
-                a = 2 * pi * self._rand(idx.numel(), 2)
-                pos[idx] = torch.stack([r * a.cos(), r * a.sin()], -1)
-                todo[idx] = (pos[idx, 0] - pos[idx, 1]).norm(dim=-1) < min_gap
-            center[rnd] = pos
-            th[rnd] = 2 * pi * self._rand(n_r, 2)
+        # random: uniform in a disc; take the first of a few candidate pairs whose bounding circles are clear
+        # (with room for the jitter added below). All candidates at once, no host sync. If none is clear
+        # (~1e-3 of resets) the env keeps the fixed layout computed above.
+        tries = 8
+        min_gap = 2 * math.hypot(*self.half) + 2 * math.hypot(self.jitter_pos, self.jitter_pos) + 0.01
+        r = self.random_r * self._rand(k, tries, 2).sqrt()
+        a = 2 * pi * self._rand(k, tries, 2)
+        cand = torch.stack([r * a.cos(), r * a.sin()], -1)  # [k,tries,2(robot),2]
+        clear = (cand[:, :, 0] - cand[:, :, 1]).norm(dim=-1) >= min_gap
+        pick = cand[torch.arange(k, device=dev), clear.float().argmax(1)]
+        rnd = (modes == name("random")) & clear.any(1)
+        center = torch.where(rnd.view(-1, 1, 1), pick, center)
+        th = torch.where(rnd.unsqueeze(-1), 2 * pi * self._rand(k, 2), th)
 
         rot = 2 * pi * self._rand(k, 1)
         c, s = rot.cos(), rot.sin()
@@ -106,24 +102,33 @@ class SumoEnv:
         return center, th
 
     def reset(self, env_mask: torch.Tensor | None = None) -> None:
-        m = torch.ones(self.n, dtype=torch.bool, device=self.device) if env_mask is None else env_mask
-        k = int(m.sum())
+        if env_mask is None:
+            env_mask = torch.ones(self.n, dtype=torch.bool, device=self.device)
+        self.reset_idx(env_mask.nonzero().squeeze(-1))
+
+    def reset_idx(self, idx: torch.Tensor) -> None:
+        """Start new matches in envs `idx` (long). Index ops only: one host sync (the caller's nonzero) per reset."""
+        k = idx.numel()
         if k == 0:
             return
-        fresh = sample_randomization(self.spec, self.n, device=self.device, generator=self.gen, randomize=self.randomize)
-        self.rand.resample(fresh, m)
-        physics.copy_params_(self.p, physics.make_params(self.spec, self.rand))
+        # sample and derive params only for the envs being reset (full-batch resampling dominated short episodes)
+        fresh = sample_randomization(self.spec, k, device=self.device, generator=self.gen, randomize=self.randomize)
+        self.rand.scatter_(fresh, idx)
+        physics.scatter_params_(self.p, physics.make_params(self.spec, fresh), idx)
 
-        allowed = torch.tensor([self.all_modes.index(s) for s in self.start_modes], device=self.device)
+        allowed = physics.const(tuple(self.all_modes.index(s) for s in self.start_modes), self.device, torch.long)
         modes = allowed[torch.randint(len(allowed), (k,), device=self.device, generator=self.gen)]
-        self.start_mode[m] = modes
-        center = physics.centers(self.state, self.p).clone()
+        self.start_mode.index_copy_(0, idx, modes)
+        center = physics.centers(self.state, self.p)
         theta = self.state.theta.clone()
-        center[m], theta[m] = self._start_poses(k, modes, self.rand["arena.start_center_dist"][m])
+        new_c, new_th = self._start_poses(k, modes, self.rand["arena.start_center_dist"][idx])
+        center.index_copy_(0, idx, new_c)
+        theta.index_copy_(0, idx, new_th)
+        m = torch.zeros(self.n, dtype=torch.bool, device=self.device).index_fill_(0, idx, True)
         physics.set_pose(self.state, self.p, center, theta, m)
-        self.sensors.prime(self.state, self.p, m)
-        self.t[m] = 0
-        self.action[m] = 0
+        self.sensors.prime(self.state, self.p, idx)
+        self.t.index_fill_(0, idx, 0)
+        self.action.index_fill_(0, idx, 0)
 
     def readings(self) -> dict[str, torch.Tensor]:
         return self.sensors.read(self.ctrl_dt / self.substeps)
@@ -217,21 +222,23 @@ class SumoTask:
         self.opp_weights = w
 
     def _new_episodes(self, m: torch.Tensor, reset_env: bool = True) -> None:
-        k = int(m.sum())
+        idx = m.nonzero().squeeze(-1)  # the only host sync of a reset
+        k = idx.numel()
         if k == 0:
             return
         if reset_env:
-            self.env.reset(m)
-        self.fsm.reset(m)
-        self.opp_type[m] = torch.multinomial(self.opp_weights, k, replacement=True, generator=self.env.gen)
-        self.fsm.variant[m] = (self.opp_type[m] - 1).clamp(min=0)
+            self.env.reset_idx(idx)
+        self.fsm.reset_idx(idx)
+        opp = torch.multinomial(self.opp_weights, k, replacement=True, generator=self.env.gen)
+        self.opp_type.index_copy_(0, idx, opp)
+        self.fsm.variant.index_copy_(0, idx, (opp - 1).clamp(min=0))
         fresh = self.env.readings()
         for key in self.readings:
             mm = m.view(-1, *([1] * (fresh[key].dim() - 1)))
             self.readings[key] = torch.where(mm, fresh[key], self.readings[key])
-        self.frames[m] = 0
-        self.prev_raw[m] = 0
-        self.ep_len[m] = 0
+        self.frames = torch.where(m.view(-1, 1, 1), torch.zeros_like(self.frames), self.frames)
+        self.prev_raw = torch.where(m.view(-1, 1), torch.zeros_like(self.prev_raw), self.prev_raw)
+        self.ep_len = torch.where(m, torch.zeros_like(self.ep_len), self.ep_len)
         self._push_frame()
         self.prev_dist, self.prev_opp_r = self._geometry()
 

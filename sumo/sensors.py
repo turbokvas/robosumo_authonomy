@@ -114,13 +114,13 @@ class Sensors:
         self.hist.index_copy_(0, self.head, self.geometry(state, p).unsqueeze(0))
         self.head.add_(1).remainder_(self.hist_len)
 
-    def prime(self, state: physics.PhysState, p: physics.PhysParams, env_mask: torch.Tensor | None = None) -> None:
+    def prime(self, state: physics.PhysState, p: physics.PhysParams, env_idx: torch.Tensor | None = None) -> None:
         """Fill the whole history with the current geometry (after a reset), so latency reads stay valid."""
         g = self.geometry(state, p)
-        if env_mask is None:
+        if env_idx is None:
             self.hist[:] = g
         else:
-            self.hist[:, env_mask] = g[env_mask]
+            self.hist[:, env_idx] = g[env_idx]
 
     def _delayed(self, latency: torch.Tensor, substep_dt: torch.Tensor, ch: slice) -> torch.Tensor:
         delay = (latency / substep_dt.view(-1, 1)).round().long().clamp(0, self.hist_len - 1)  # [N,R]
