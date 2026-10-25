@@ -60,7 +60,8 @@ runs/              # чекпоінти + конфіг + git hash (в .gitignore
 - `arduino-cli` з ядром `arduino:avr` (FQBN Nano: `arduino:avr:nano`), `ffmpeg` у PATH.
 
 ## Команди (заповнювати по мірі появи)
-- `uv run pytest`
+- `uv run pytest` (`-s`, щоб побачити заміряну швидкість фізики)
+- `uv run python -m sumo.render --demo` — відео-перевірка фізики в `runs/videos/`
 - `uv run python -m train.ppo --config ...`
 - `uv run python -m train.eval --ckpt ...`
 - `uv run python -m export.gen_header --ckpt ...`
