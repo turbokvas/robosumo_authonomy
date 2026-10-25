@@ -67,6 +67,7 @@ runs/              # чекпоінти + конфіг + git hash (в .gitignore
 - `uv run python -m sumo.render --demo` — відео-перевірка фізики в `runs/videos/`
 - `uv run python -m sumo.match --a aggressive --b random_walker --n 4096 [--nominal] [--video 6]` — FSM проти FSM
 - `uv run python -m sumo.match --matrix --n 1024 --nominal` — матриця win-rate усіх варіантів FSM
-- `uv run python -m train.ppo --config ...`
-- `uv run python -m train.eval --ckpt ...`
+- `uv run python -m train.ppo --config configs/m3.yaml` — тренування (tensorboard: `uv run tensorboard --logdir runs`)
+- `uv run python -m train.eval --ckpt runs/<run>/ckpt_latest.pt [--video 2]` — win-rate проти всіх суперників
+- `uv run python scripts/bench_env.py --n 4096` — швидкість середовища
 - `uv run python -m export.export --ckpt ...`

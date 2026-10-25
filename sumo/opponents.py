@@ -42,6 +42,7 @@ class FSM:
         """variant=None: every match draws a variant uniformly from spec opponent.variants."""
         self.variants: list[str] = get(spec, "opponent.variants")
         self.fixed_variant = None if variant is None else self.variants.index(variant)
+        self.weights: torch.Tensor | None = None  # sampling weights over variants on reset (None = uniform)
         self.ranges = {k[len(PARAM_PREFIX):]: v for k, v in rand_ranges(spec).items() if k.startswith(PARAM_PREFIX)}
         self.n, self.device, self.gen = n_envs, device, generator
         z = lambda dtype=torch.float32: torch.zeros(n_envs, device=device, dtype=dtype)  # noqa: E731
@@ -71,7 +72,8 @@ class FSM:
         if k == 0:
             return
         if self.fixed_variant is None:
-            self.variant[m] = torch.randint(len(self.variants), (k,), device=self.device, generator=self.gen)
+            w = torch.ones(len(self.variants), device=self.device) if self.weights is None else self.weights
+            self.variant[m] = torch.multinomial(w, k, replacement=True, generator=self.gen)
         else:
             self.variant[m] = self.fixed_variant
         for name, (lo, hi) in self.ranges.items():
