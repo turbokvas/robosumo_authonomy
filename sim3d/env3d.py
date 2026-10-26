@@ -224,8 +224,14 @@ class SumoEnv3D:
         self.body_geoms = [[g for g in range(m.ngeom) if m.geom_bodyid[g] == self.body_id[r] and m.geom_contype[g]]
                            for r in range(2)]
         self.wheel_half_w = float(m.geom_size[self.wheel_geoms[0][0]][1])
+        # per robot, (left, right): the wheel geom and its axle offset (x, y) from the body origin
+        self.wheel_geom_lr = [[next(g for g in range(m.ngeom) if m.geom_bodyid[g] == wb) for wb in self.wheel_body[r]]
+                              for r in range(physics.N_ROBOTS)]
         geo = load_geometry()
         self.axle_z, self.cad_wheel_r = geo["axle_z"], geo["wheel_radius"]
+        half = geo["track_width"] / 2
+        self.wheel_xy = torch.tensor([[geo["axle_x"], half], [geo["axle_x"], -half]], device=dev)  # [2 wheels, xy]
+        self.slide_vel = get(self.spec, "robot.drive.tire_slide_vel")
         self.edge_geom = [m.geom(f"{r}_edge").id for r in ROBOTS]
         self.edge_tip_x = geo["blade_edge"]["x"] + geo["blade_edge"]["radius"]
         self.edge_half_len = float(m.geom_size[self.edge_geom[0]][1])
@@ -344,6 +350,24 @@ class SumoEnv3D:
         if prev_pos is not None:
             st.lift = ((com[..., 2] - self.rest_z) / 0.05).clamp(min=0)
 
+    def _tire_friction(self) -> None:
+        """Static vs sliding tire friction, which MuJoCo does not distinguish: μ for a rolling wheel, falling to
+        μ·tire_slide_ratio as the contact slips (exp(-slip/tire_slide_vel)). Uses the velocities of the last control
+        step, so it lags by one tick."""
+        p, st = self.p, self.state
+        c, s = st.theta.cos(), st.theta.sin()                                    # [N,R]
+        k = self.rand["robot.drive.tire_slide_ratio"]
+        for r in range(physics.N_ROBOTS):
+            v = self.qvel[:, self.free_dadr[r]:self.free_dadr[r] + 2]             # body origin, world xy
+            for w in range(2):
+                lx, ly = self.wheel_xy[w]
+                ox, oy = c[:, r] * lx - s[:, r] * ly, s[:, r] * lx + c[:, r] * ly   # wheel offset in world
+                vx = v[:, 0] - st.omega[:, r] * oy - st.wheel_w[:, r, w] * p.wheel_r[:, r] * c[:, r]
+                vy = v[:, 1] + st.omega[:, r] * ox - st.wheel_w[:, r, w] * p.wheel_r[:, r] * s[:, r]
+                slip = torch.sqrt(vx * vx + vy * vy)
+                self.m_friction[:, self.wheel_geom_lr[r][w], 0] = p.tire_mu[:, r] * (
+                    k[:, r] + (1 - k[:, r]) * torch.exp(-slip / self.slide_vel))
+
     def readings(self) -> dict[str, torch.Tensor]:
         r = self.sensors.read(self.ctrl_dt)  # one history slot per control tick
         r.update(self.sensors.motion(self.state, self.prev_vel, self.ctrl_dt))
@@ -367,6 +391,7 @@ class SumoEnv3D:
         for r in range(physics.N_ROBOTS):
             self.ctrl[:, self.motor[r]] = drive[:, r]
             self.m_damping[:, self.wheel_dadr[r]] = locked[:, r]
+        self._tire_friction()
         self.prev_vel.copy_(st.vel)
         prev_pos = st.pos.clone()
         self._to_warp()

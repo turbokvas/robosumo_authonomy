@@ -16,16 +16,15 @@ env:
     encoders: 0.5
     imu: 0.5
 
-reward:                            # M5: push shaping back on (fades over 600M); approach stays off (it favours head-on)
+reward:                            # shaping off: the draws were the tire model (see PROGRESS.md), not the reward
   win: 10.0
   loss: -10.0
   draw: -4.0                       # 3D plateaued at ~30% clinch draws; owner's rule: −4 if no progress
   approach: 0.0
-  push: 3.0                        # per metre the opponent moves off centre while close: credit for partial
-                                   # pushes and side hits (head-on into a still robot only beaches the attacker)
+  push: 0.0
   push_gate_dist: 0.3
   jerk: 0.02
-  shaping_anneal_steps: 600_000_000  # push fades linearly to 0
+  shaping_anneal_steps: 1
 
 ppo:
   total_steps: 2_000_000_000

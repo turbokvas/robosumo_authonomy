@@ -149,3 +149,20 @@ def test_side_push_beats_head_on(spec):
     run(env, act, 2.0)
     moved = env.state.pos[:, 1, 0] - x0
     assert moved[0] > 0.2 and moved[0] > 2 * moved[1], moved
+
+
+def test_sliding_tires_grip_less(spec):
+    """Rolling tires keep (nearly) the static μ, a locked wheel dragged sideways or a spinning wheel gets μ·slide_ratio."""
+    env = SumoEnv3D(spec, 2, DEV, seed=0, randomize=False)
+    place(env, (-0.6, 0.0), 0.0, (0.6, 0.6), 0.0)
+    act = torch.zeros(2, 2, 2, device=DEV)
+    act[:, 0] = 1.0
+    run(env, act, 0.8)  # robot 0 at free speed, robot 1 idle
+    k = get(spec, "robot.drive.tire_slide_ratio")
+    mu = get(spec, "robot.drive.tire_mu")
+    rolling = env.m_friction[:, env.wheel_geom_lr[0][0], 0]
+    assert (rolling > 0.95 * mu).all(), rolling
+    env.qvel[:, env.free_dadr[1] + 1] = 0.5  # drag the idle robot sideways
+    env.step(torch.zeros(2, 2, 2, device=DEV))
+    sliding = env.m_friction[:, env.wheel_geom_lr[1][0], 0]
+    assert torch.allclose(sliding, torch.full_like(sliding, k * mu), atol=0.02), sliding
