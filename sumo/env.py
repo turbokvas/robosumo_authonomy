@@ -78,7 +78,9 @@ class SumoEnv:
         th = torch.zeros(k, 2, device=dev)
         th = torch.where((modes == name("face_to_face")).unsqueeze(-1), physics.const((0.0, pi), dev), th)
         th = torch.where((modes == name("back_to_back")).unsqueeze(-1), physics.const((pi, 0.0), dev), th)
-        th = torch.where((modes == name("side_by_side")).unsqueeze(-1), physics.const((pi / 2, pi / 2), dev), th)
+        # side by side: which robot has the other on its right is random, else slot 0 always gets the same side
+        side = torch.where(self._rand(k, 1) < 0.5, -1.0, 1.0)
+        th = torch.where((modes == name("side_by_side")).unsqueeze(-1), side * physics.const((pi / 2, pi / 2), dev), th)
 
         # random: uniform in a disc; take the first of a few candidate pairs whose bounding circles are clear
         # (with room for the jitter added below). All candidates at once, no host sync. If none is clear

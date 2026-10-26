@@ -82,7 +82,9 @@ def main() -> None:
         cfg = ckpt["cfg"]
     else:
         ap.error("--config or --resume is required")
-    spec = ckpt["spec"] if ckpt else load_spec()
+    spec = load_spec()  # always the current spec: it has to match the current sim code
+    if ckpt and ckpt["spec"] != spec:
+        print("note: robot_spec.yaml changed since this checkpoint was written; continuing with the current one")
     pc, rc, cc, ec = cfg["ppo"], cfg["reward"], cfg.get("curriculum"), cfg["eval"]
     total = args.total_steps or pc["total_steps"]
     dev = args.device

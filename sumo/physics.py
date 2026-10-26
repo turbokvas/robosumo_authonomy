@@ -74,6 +74,7 @@ class PhysParams:
     front_cos: float
     angle_adv: float             # rad
     clearance_adv: float
+    adv_deadband: float
     lift_time: float
     drop_time: float
 
@@ -166,6 +167,7 @@ def make_params(
         front_cos=math.cos(math.radians(wedge["front_cone_deg"])),
         angle_adv=math.radians(wedge["angle_advantage_deg"]),
         clearance_adv=wedge["clearance_advantage"],
+        adv_deadband=wedge["advantage_deadband"],
         lift_time=wedge["lift_time_s"],
         drop_time=wedge["drop_time_s"],
     )
@@ -349,8 +351,10 @@ def _update_lift(
     n_out = torch.stack([n01, -n01], dim=1)  # [N,R,2] from each robot towards the other
     cos = (n_out * fwd).sum(-1)
     front = cos > p.front_cos
-    mis = torch.acos(cos.clamp(-1, 1))
+    mis = torch.atan2(_cross(fwd, n_out).abs(), cos)  # atan2, not acos: acos near 1 turns float noise into 1e-4 rad
     adv = (mis - mis.flip(1)) / p.angle_adv + (p.clearance.flip(1) - p.clearance) / p.clearance_adv
+    # a near-tie is a clinch: without the deadband, float noise in symmetric contacts systematically picked robot 0
+    adv = (adv - p.adv_deadband) / (1 - p.adv_deadband)
     share = torch.where(front.flip(1), adv.clamp(0, 1), torch.ones_like(adv))  # opponent's front too → contest
     pushing = front & touching.unsqueeze(-1)
     latched = torch.maximum(state.wedge, torch.where(state.wedge.flip(1) > 0, torch.zeros_like(share), share))
