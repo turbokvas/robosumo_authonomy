@@ -1,0 +1,3 @@
+[100,139,008] eval stationary 69%  aggressive 72%  cautious_e 64%  spinner 63%  random_wal 73%  pool0 43%  pool1 37%  pool2 42%  pool3 42%  anchor_sco 49%  → ckpt_00100M.pt
+[200,278,016] eval stationary 69%  aggressive 72%  cautious_e 65%  spinner 65%  random_wal 71%  pool0 42%  pool1 33%  pool2 44%  pool3 44%  anchor_sco 50%  → ckpt_00200M.pt
+[300,417,024] eval stationary 70%  aggressive 72%  cautious_e 64%  spinner 67%  random_wal 72%  pool0 40%  pool1 27%  pool2 41%  pool3 45%  anchor_sco 49%  → ckpt_00300M.pt
