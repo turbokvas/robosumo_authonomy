@@ -26,7 +26,7 @@ from torch.utils.tensorboard import SummaryWriter
 from sumo import interface as iface
 from sumo.config import SPEC_PATH, get, load_spec
 from sumo.env import DRAW, SumoTask
-from train.eval import evaluate, video
+from train.eval import evaluate_many, video
 from train.league import League, PolicyPool
 from train.models import Actor, Critic
 
@@ -315,16 +315,20 @@ def main() -> None:
         if step >= next_eval or step >= total:
             next_eval += ec["every_steps"]
             actor.eval()
-            res = {}
             anchors = [f"pool{i}" for i in range(league.cfg["anchors"])] if league else []
-            for name in task.opp_names[: task.n_fsm + 1] + anchors:
-                r = evaluate(actor, spec, cfg, name, ec["matches"], dev, pool=pool)
+            names = task.opp_names[: task.n_fsm + 1] + anchors
+            # all opponents in one batch (sequential evals took longer than the training between them)
+            ev = evaluate_many(actor, spec, cfg, names, ec["matches"], dev, pool=pool)
+            res = {}
+            for name, r in ev.items():
                 res[name] = r["win"]
                 writer.add_scalar(f"eval_win/{name}", r["win"], step)
                 writer.add_scalar(f"eval_draw/{name}", r["draw"], step)
+                writer.add_scalar(f"eval_score/{name}", r["win"] + 0.5 * r["draw"], step)
             if anchors:
-                res["anchor_mean"] = sum(res[a] for a in anchors) / len(anchors)
-                writer.add_scalar("eval_win/anchor_mean", res["anchor_mean"], step)
+                # score = win + draw/2 (Elo convention): many anchor games end in a clinch, wins alone mislead
+                res["anchor_score"] = sum(ev[a]["win"] + 0.5 * ev[a]["draw"] for a in anchors) / len(anchors)
+                writer.add_scalar("eval_score/anchor_mean", res["anchor_score"], step)
             path = save(f"{step // 1_000_000:05d}M")
             print(f"[{step:,}] eval " + "  ".join(f"{k[:10]} {v:.0%}" for k, v in res.items()) + f"  → {path.name}", flush=True)
             n_evals += 1

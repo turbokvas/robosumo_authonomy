@@ -55,7 +55,7 @@ league:
   win_ema: 0.01                    # per-episode EMA rate for the win-rate estimates
 
 eval:
-  every_steps: 100_000_000
+  every_steps: 200_000_000        # at ~430k steps/s that is every ~8 min
   matches: 1024
   video_matches: 6
-  video_every_evals: 3             # rendering is CPU-bound, ~1-2 min each
+  video_every_evals: 2             # rendering is CPU-bound, ~1-2 min each
