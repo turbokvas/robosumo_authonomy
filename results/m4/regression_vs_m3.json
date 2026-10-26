@@ -1,0 +1,24 @@
+{
+  "candidate": {
+    "stationary": 0.955078125,
+    "aggressive": 0.939453125,
+    "cautious_edge_waiter": 0.9114583333333333,
+    "spinner": 0.927734375,
+    "random_walker": 0.90625,
+    "results/m3/ckpt_00500M_v2.pt": 0.701171875,
+    "results/m4_run1/ckpt_00400M_v2.pt": 0.53515625,
+    "results/m4_run1/ckpt_02700M_v2.pt": 0.5807291666666666
+  },
+  "baseline": {
+    "stationary": 0.888671875,
+    "aggressive": 0.9342447916666666,
+    "cautious_edge_waiter": 0.9322916666666665,
+    "spinner": 0.8990885416666666,
+    "random_walker": 0.8697916666666667,
+    "results/m3/ckpt_00500M_v2.pt": 0.3391927083333333,
+    "results/m4_run1/ckpt_00400M_v2.pt": 0.35026041666666663,
+    "results/m4_run1/ckpt_02700M_v2.pt": 0.5872395833333334
+  },
+  "regressions": {},
+  "passed": true
+}
