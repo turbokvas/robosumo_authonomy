@@ -197,6 +197,7 @@ def main() -> None:
     next_eval, next_ckpt, update = (step // ev + 1) * ev, (step // ck + 1) * ck, 0
     next_snapshot = (step // lc["snapshot_steps"] + 1) * lc["snapshot_steps"] if lc else 0
     t_resume = step
+    n_evals = 0
     t_start = time.perf_counter()
     while step < total:
         task.shaping_scale = max(0.0, 1.0 - step / rc["shaping_anneal_steps"])
@@ -326,11 +327,13 @@ def main() -> None:
                 writer.add_scalar("eval_win/anchor_mean", res["anchor_mean"], step)
             path = save(f"{step // 1_000_000:05d}M")
             print(f"[{step:,}] eval " + "  ".join(f"{k[:10]} {v:.0%}" for k, v in res.items()) + f"  → {path.name}", flush=True)
-            try:
-                video(actor, spec, cfg, ["aggressive", "spinner", "random_walker"], ec["video_matches"] // 3, dev,
-                      run_dir / f"video_{step // 1_000_000:05d}M.mp4")
-            except FileNotFoundError:
-                print("ffmpeg not on PATH, skipping video")
+            n_evals += 1
+            if (n_evals - 1) % ec.get("video_every_evals", 1) == 0:  # rendering runs on the CPU, ~1-2 min
+                try:
+                    video(actor, spec, cfg, ["aggressive", "spinner", "random_walker"], ec["video_matches"] // 3, dev,
+                          run_dir / f"video_{step // 1_000_000:05d}M.mp4")
+                except FileNotFoundError:
+                    print("ffmpeg not on PATH, skipping video")
             actor.train()
 
     writer.close()

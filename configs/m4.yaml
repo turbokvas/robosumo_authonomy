@@ -5,7 +5,7 @@ seed: 1
 init_ckpt: results/m3/ckpt_00500M_v2.pt   # M3 on interface v2 (memory inputs start at zero weight)
 
 env:
-  num_envs: 4096
+  num_envs: 16384                  # 4096 was launch-bound (16 ms/step); 4x envs ≈ 2.2x rollout throughput
   randomize: false                 # hardware *_rand still off (M5)
   sensor_dropout:                  # імовірність, що резервна група сенсорів відсутня в матчі (interface v1)
     bare: 0.5                      # імовірність матчу зовсім без резервних сенсорів (як теперішнє залізо)
@@ -25,11 +25,11 @@ reward:                            # shaping stays off: M3 already annealed it t
 
 ppo:
   total_steps: 2_000_000_000
-  rollout: 64
+  rollout: 32                      # batch 16384×32 = 524k samples per update
   gamma: 0.995
   gae_lambda: 0.95
   lr: 1.5e-4
-  epochs: 4
+  epochs: 3                        # big batch: fewer passes, update time stays below rollout time
   minibatches: 8
   clip: 0.2
   ent_coef: 0.002
@@ -58,3 +58,4 @@ eval:
   every_steps: 100_000_000
   matches: 1024
   video_matches: 6
+  video_every_evals: 3             # rendering is CPU-bound, ~1-2 min each
