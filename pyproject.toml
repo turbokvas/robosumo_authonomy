@@ -10,6 +10,9 @@ dependencies = [
     "tensorboard",
     "matplotlib",
     "pygame",
+    "mujoco>=3.17.0",
+    "warp-lang>=1.18.0",
+    "mujoco-warp>=3.17.0",
 ]
 
 [dependency-groups]
