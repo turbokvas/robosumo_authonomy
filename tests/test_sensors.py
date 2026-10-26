@@ -66,12 +66,12 @@ def test_nothing_behind(spec):
 def test_line_sensors(spec):
     r = get(spec, "arena.ring_diameter") / 2
     p, s, sens = make(spec, 1, (5.0, 5.0), 0.0)
-    assert not sens.geometry(s, p)[0, 0, 6:].any()  # centre of the ring: all white
+    assert not sens.geometry(s, p)[0, 0, 10:].any()  # centre of the ring: all white
     # front corners in the black band, rear still on white
     p, s, sens = make(spec, 1, (5.0, 5.0), 0.0, xy0=(r - 0.12, 0.0))
-    assert sens.geometry(s, p)[0, 0, 6:].tolist() == [True, True, False, False]
+    assert sens.geometry(s, p)[0, 0, 10:].tolist() == [True, True, False, False]
     p, s, sens = make(spec, 1, (5.0, 5.0), 0.0, xy0=(r + 0.3, 0.0))  # fell off: no reflection
-    assert sens.geometry(s, p)[0, 0, 6:].all()
+    assert sens.geometry(s, p)[0, 0, 10:].all()
 
 
 def test_latency(spec):
@@ -101,7 +101,7 @@ def test_crosstalk_beyond_range(spec):
     p, s, sens = make(spec, n, (1.4, 0.0), math.pi)
     g = sens.geometry(s, p)
     assert not g[0, 0, :3].any()
-    assert g[0, 0, 3:6].any()
+    assert g[0, 0, 5:8].any()
     ir = sens.read(substep_dt(spec, n))["ir"][:, 0]
     xt_p = get(spec, "robot.sensors.opponent_ir.crosstalk_p")
     assert ir[:, 1].float().mean().item() > 0.8 * xt_p

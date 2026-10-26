@@ -23,8 +23,9 @@ import torch
 import yaml
 from torch.utils.tensorboard import SummaryWriter
 
+from sumo import interface as iface
 from sumo.config import SPEC_PATH, get, load_spec
-from sumo.env import DRAW, FRAME_DIM, SumoTask
+from sumo.env import DRAW, SumoTask
 from train.eval import evaluate, video
 from train.league import League, PolicyPool
 from train.models import Actor, Critic
@@ -76,6 +77,8 @@ def main() -> None:
     args = ap.parse_args()
 
     ckpt = torch.load(args.resume, map_location=args.device, weights_only=False) if args.resume else None
+    if ckpt:
+        iface.check_checkpoint(ckpt, args.resume)
     if args.config:
         cfg = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
     elif ckpt:
@@ -105,9 +108,10 @@ def main() -> None:
     print(f"run: {run_dir}  (git {commit})")
 
     n, T = cfg["env"]["num_envs"], pc["rollout"]
-    hidden = get(spec, "controller.policy.hidden")
+    iface.check_spec(spec)
+    hidden = list(iface.HIDDEN)
     lc = cfg.get("league")
-    pool = PolicyPool(lc["pool_size"], get(spec, "controller.policy.obs_frame_stack") * FRAME_DIM, hidden, dev) if lc else None
+    pool = PolicyPool(lc["pool_size"], iface.OBS_DIM, hidden, dev) if lc else None
     task = SumoTask(spec, cfg, n, dev, cfg["seed"], pool=pool)
     stages = cc["stages"] if cc else [{"name": "league", "opponents": {}}]
     stage = 0
@@ -117,11 +121,13 @@ def main() -> None:
     window = WinWindow(cc["window"], dev) if cc else None
 
     obs_dim, cobs_dim = task.obs().shape[1], task.critic_obs().shape[1]
-    actor = Actor(obs_dim, hidden, init_log_std=pc["init_log_std"]).to(dev)
+    actor = Actor(obs_dim, hidden, init_log_std=pc["init_log_std"], zero_inputs=iface.reserved_obs_columns()).to(dev)
     critic = Critic(cobs_dim, pc["critic_hidden"]).to(dev)
     init = None if ckpt else (args.init or cfg.get("init_ckpt"))
     if init:
-        actor.load_state_dict(torch.load(ROOT / init, map_location=dev, weights_only=False)["actor"])
+        init_ckpt = torch.load(ROOT / init, map_location=dev, weights_only=False)
+        iface.check_checkpoint(init_ckpt, init)
+        actor.load_state_dict(init_ckpt["actor"])
         with torch.no_grad():
             actor.log_std.fill_(pc["init_log_std"])
         print(f"actor initialised from {init}")
@@ -166,6 +172,7 @@ def main() -> None:
             "step": step, "stage": stage, "obs_dim": obs_dim, "cobs_dim": cobs_dim,
             "cfg": cfg, "spec": spec, "git": commit,
         }
+        iface.stamp(state, spec)
         if league:
             state["league"] = league.state()
         paths = [run_dir / "ckpt_latest.pt"] + ([run_dir / f"ckpt_{tag}.pt"] if tag else [])

@@ -32,7 +32,7 @@ class PolicyPool:
                 W[slot] = lin.weight.T
                 B[slot] = lin.bias
             self.mean[slot] = actor.norm.mean
-            self.std[slot] = (actor.norm.var + 1e-8).sqrt()
+            self.std[slot] = actor.norm.std()
         if slot < len(self.names):
             self.names[slot] = name
         else:

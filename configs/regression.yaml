@@ -1,0 +1,10 @@
+# Regression suite (M4/M5): fixed opponents and seeds. A new policy must not fall behind the baseline against
+# anyone the baseline already beats.   uv run python -m train.eval --ckpt NEW --regression configs/regression.yaml --baseline OLD
+opponents: [stationary, aggressive, cautious_edge_waiter, spinner, random_walker]
+anchor_checkpoints:                # frozen policies every new version is also checked against
+  - results/m3/ckpt_00500M_v1.pt
+seeds: [1001, 1002, 1003]
+matches: 512                       # per opponent per seed
+sensors: installed                 # reserved sensor groups as on the current robot
+beaten_at: 0.5                     # "the baseline beats it" = baseline win rate ≥ this
+tolerance: 0.03                    # allowed drop in win rate (noise at 3×512 matches is ~±1.3%)

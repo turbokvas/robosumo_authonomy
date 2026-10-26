@@ -1,4 +1,4 @@
-# Стан проєкту (оновлено 2026-10-26, ~03:00)
+# Стан проєкту (оновлено 2026-10-26, ранок)
 
 ## Зроблено
 - **M0–M2** — сетап, 2D-фізика з моделлю клина, сенсори, FSM-суперники, правила матчу (в `main`).
@@ -16,7 +16,10 @@
   Критерій M3 (>70% проти всіх FSM, без експлойтів на відео) виконано.
 - Усе для M3 лежить у `results/m3/`: чекпоінт `ckpt_00500M.pt`, конфіг і spec запуску, git hash, історія перевірок,
   tensorboard-лог, відео `final_matches.mp4`.
-- **M4 — код ліги готовий, ще не запускали:** `train/league.py`, `configs/m4.yaml` (стартує з `results/m3/ckpt_00500M.pt`).
+- **Інтерфейс політики заморожено (v1)** — `sumo/interface.py`, деталі в PLAN.md (після M3) і PROGRESS.md.
+  M3-політика на v1: `results/m3/ckpt_00500M_v1.pt` (86–93% проти FSM уже з компенсацією мертвої зони).
+- **M4 — ліга:** `train/league.py`, `configs/m4.yaml` (стартує з `results/m3/ckpt_00500M_v1.pt`), eval з матрицею/Elo
+  і регресійним набором `configs/regression.yaml`.
 
 ## Як продовжити
 ```bash
@@ -30,8 +33,10 @@ uv run python -m train.ppo --config configs/m4.yaml
 # якщо тренування обірвалось (світло, перезавантаження) — продовжити з того ж місця
 uv run python -m train.ppo --resume runs/<run>/ckpt_latest.pt
 
-# перевірити будь-який чекпоінт
-uv run python -m train.eval --ckpt results/m3/ckpt_00500M.pt --video 2
+# перевірити будь-який чекпоінт (v1); --set для зміненої фізики, --sensors all/none/installed
+uv run python -m train.eval --ckpt results/m3/ckpt_00500M_v1.pt --video 2
+uv run python -m train.eval --ckpt NEW.pt --regression configs/regression.yaml --baseline results/m3/ckpt_00500M_v1.pt
+uv run python -m train.eval --matrix A.pt B.pt C.pt --matches 512
 ```
 `ckpt_latest.pt` перезаписується атомарно кожні 10 млн кроків (тимчасовий файл + rename), тож після вимкнення
 світла втрачається максимум ~2 хв тренування. `runs/` не в git — після запуску переносити важливе в `results/`.

@@ -2,11 +2,15 @@
 
 run_name: m4_league
 seed: 1
-init_ckpt: results/m3/ckpt_00500M.pt   # final M3 policy (500M steps, shaping fully annealed)
+init_ckpt: results/m3/ckpt_00500M_v1.pt   # final M3 policy, migrated to interface v1
 
 env:
   num_envs: 4096
   randomize: false                 # hardware *_rand still off (M5)
+  sensor_dropout:                  # імовірність, що резервна група сенсорів відсутня в матчі (interface v1)
+    side_ir: 0.5
+    encoders: 0.5
+    imu: 0.5
 
 reward:                            # shaping stays off: M3 already annealed it to 0
   win: 10.0

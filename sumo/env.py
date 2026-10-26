@@ -1,7 +1,8 @@
 """SumoEnv: batched matches on the GPU. Both robot slots take [left, right] actions at the control tick.
 
 One `step` = one control period of each env (jittered rate from the spec), split into a fixed number of physics
-substeps, so envs stay in lockstep while their control periods differ. Actions go through the firmware's slew limit.
+substeps, so envs stay in lockstep while their control periods differ. Actions (fractions of max drive) go through
+the firmware layer (sumo/firmware.py): slew limit, then deadband compensation → motor duty.
 Match rules: CoM out of the ring loses; both out on the same tick or timeout → draw.
 On CUDA the substep block (physics + sensor history) is captured once as a CUDA graph and replayed: the sim is
 launch-bound otherwise. Everything the graph touches is updated in place (params, randomization, actions).
@@ -15,8 +16,9 @@ from typing import Any
 
 import torch
 
-from sumo import physics
-from sumo.config import get, rand_ranges, sample_randomization
+from sumo import firmware, physics
+from sumo import interface as iface
+from sumo.config import get, sample_randomization
 from sumo.opponents import FSM
 from sumo.sensors import Sensors
 
@@ -41,6 +43,7 @@ class SumoEnv:
         self.all_modes: list[str] = get(spec, "arena.start_modes")
         self.start_modes = start_modes or self.all_modes
         self.slew = get(spec, "controller.slew_limit_per_step")
+        self.deadband_comp = get(spec, "controller.deadband_compensation")
         self.timeout = get(spec, "match.timeout_s")
         self.jitter_pos = get(spec, "arena.start_jitter_pos")
         self.jitter_th = math.radians(get(spec, "arena.start_jitter_deg"))
@@ -55,7 +58,9 @@ class SumoEnv:
         self.substeps = self.sensors.substeps
         z = lambda *s, dtype=torch.float32: torch.zeros(num_envs, *s, device=device, dtype=dtype)  # noqa: E731
         self.t = z()
-        self.action = z(physics.N_ROBOTS, 2)
+        self.action = z(physics.N_ROBOTS, 2)  # applied action (after slew), what the firmware remembers
+        self.duty = z(physics.N_ROBOTS, 2)    # motor duty after deadband compensation (physics input)
+        self.prev_vel = z(physics.N_ROBOTS, 2)  # CoM velocity at the previous control tick (IMU)
         self.start_mode = z(dtype=torch.long)
         self.use_graph = use_graph and torch.device(device).type == "cuda"
         self._graph: torch.cuda.CUDAGraph | None = None
@@ -130,15 +135,18 @@ class SumoEnv:
         physics.set_pose(self.state, self.p, center, theta, m)
         self.sensors.prime(self.state, self.p, idx)
         self.t.index_fill_(0, idx, 0)
-        self.action.index_fill_(0, idx, 0)
+        for x in (self.action, self.duty, self.prev_vel):
+            x.index_fill_(0, idx, 0)
 
     def readings(self) -> dict[str, torch.Tensor]:
-        return self.sensors.read(self.ctrl_dt / self.substeps)
+        r = self.sensors.read(self.ctrl_dt / self.substeps)
+        r.update(self.sensors.motion(self.state, self.prev_vel, self.ctrl_dt))
+        return r
 
     def _substeps(self) -> None:
         dt = self.ctrl_dt / self.substeps
         for _ in range(self.substeps):
-            physics.step(self.state, self.p, self.action, dt=dt)
+            physics.step(self.state, self.p, self.duty, dt=dt)
             self.sensors.push(self.state, self.p)
         self.t.add_(self.ctrl_dt)
 
@@ -164,7 +172,12 @@ class SumoEnv:
 
     def step(self, action: torch.Tensor) -> tuple[dict[str, torch.Tensor], torch.Tensor, torch.Tensor]:
         """action [N,R,2] in [-1, 1] → (readings, done [N], winner [N]: 0/1 or DRAW). No auto-reset."""
-        self.action.add_((action.clamp(-1, 1) - self.action).clamp(-self.slew, self.slew))
+        self.action.copy_(firmware.slew(self.action, action, self.slew))
+        if self.deadband_comp:
+            self.duty.copy_(firmware.deadband_comp(self.action, self.p.deadband_cal.unsqueeze(-1)))
+        else:
+            self.duty.copy_(self.action)
+        self.prev_vel.copy_(self.state.vel)
         if self.use_graph:
             if self._graph is None:
                 self._capture()
@@ -183,7 +196,6 @@ class SumoEnv:
 
 
 STATIONARY = "stationary"
-FRAME_DIM = 10  # 3 IR + 4 line + previous action (2) + battery
 
 
 class SumoTask:
@@ -191,11 +203,12 @@ class SumoTask:
 
     Opponent types: "stationary", the FSM variants, and (when a policy pool is attached, M4) frozen policy
     snapshots "pool0".."poolK-1" that see robot 1's own actor obs.
-
-    Actor obs = only what the robot's MCU has: frame stack of [3 IR, 4 line, previous applied action (2), battery].
-    Critic obs = privileged state of both robots, randomization, opponent type and FSM mode (sim only).
+    Actor obs and action follow the frozen interface (sumo/interface.py): only what the robot's MCU has.
+    Critic obs = privileged state of both robots, their physical parameters, opponent type, FSM mode/params.
     Reward = terminal win/loss/draw + shaping (approach, push the opponent off centre while close, action jerk);
     approach/push are multiplied by `shaping_scale`, which the trainer anneals to 0.
+    Reserved sensor groups are present/absent per robot per match: `sensors` = "train" (random, cfg
+    env.sensor_dropout = probability a group is absent), "installed" (spec `installed` flags), "all" or "none".
     Finished envs auto-reset; the obs returned for them belong to the new episode.
     """
 
@@ -207,8 +220,10 @@ class SumoTask:
         device: str | torch.device,
         seed: int,
         pool: Any = None,
+        sensors: str = "train",
     ):
-        """pool: object with `capacity` and `act(obs [N,D], slot [N]) -> [N,2]` (train.league.PolicyPool)."""
+        """pool: object with `capacity`, `size` and `act(obs [N,D], slot [N]) -> [N,2]` (train.league.PolicyPool)."""
+        iface.check_spec(spec)
         self.spec, self.n, self.device = spec, num_envs, device
         self.env = SumoEnv(spec, num_envs, device, randomize=cfg["env"]["randomize"], seed=seed)
         self.fsm = FSM(spec, num_envs, device, None, self.env.gen)
@@ -217,13 +232,21 @@ class SumoTask:
         self.opp_names = [STATIONARY] + self.fsm.variants + [f"pool{i}" for i in range(pool.capacity if pool else 0)]
         self.opp_weights = torch.ones(len(self.opp_names), device=device)
         self.opp_type = torch.zeros(num_envs, dtype=torch.long, device=device)
-        self.stack = get(spec, "controller.policy.obs_frame_stack")
-        self.frames = torch.zeros(num_envs, physics.N_ROBOTS, self.stack, FRAME_DIM, device=device)
+        self.frames = torch.zeros(num_envs, physics.N_ROBOTS, iface.OBS_STACK, iface.FRAME_DIM, device=device)
+        groups = list(iface.SENSOR_GROUPS)
+        if sensors == "train":
+            drop = cfg["env"].get("sensor_dropout", {})
+            self.absent_p = torch.tensor([drop.get(g, 1.0) for g in groups], device=device)
+        elif sensors == "installed":
+            sens = get(spec, "robot.sensors")
+            self.absent_p = torch.tensor([0.0 if sens[g]["installed"] else 1.0 for g in groups], device=device)
+        elif sensors in ("all", "none"):
+            self.absent_p = torch.full((len(groups),), 0.0 if sensors == "all" else 1.0, device=device)
+        else:
+            raise ValueError(f"sensors={sensors!r}")
+        self.present = torch.zeros(num_envs, physics.N_ROBOTS, len(groups), device=device)
         self.rew = cfg["reward"]
         self.shaping_scale = 1.0
-        self.ranges = sorted(rand_ranges(spec).items())
-        motors = get(spec, "robot.motors.est_16v")
-        self.omega0 = motors["no_load_rpm"] * 2 * math.pi / 60
         self.prev_raw = torch.zeros(num_envs, 2, device=device)
         self.readings = self.env.readings()
         self.ep_len = torch.zeros(num_envs, device=device)
@@ -247,7 +270,9 @@ class SumoTask:
         self.fsm.reset_idx(idx)
         opp = torch.multinomial(self.opp_weights, k, replacement=True, generator=self.env.gen)
         self.opp_type.index_copy_(0, idx, opp)
-        self.fsm.variant.index_copy_(0, idx, (opp - 1).clamp(min=0))
+        self.fsm.variant.index_copy_(0, idx, (opp - 1).clamp(0, self.n_fsm - 1))
+        u = torch.rand(k, physics.N_ROBOTS, len(self.absent_p), device=self.device, generator=self.env.gen)
+        self.present.index_copy_(0, idx, (u >= self.absent_p).float())
         fresh = self.env.readings()
         for key in self.readings:
             mm = m.view(-1, *([1] * (fresh[key].dim() - 1)))
@@ -260,15 +285,29 @@ class SumoTask:
 
     # --- observations ----------------------------------------------------------------------------------------------
     def _frame(self) -> torch.Tensor:
-        """Current MCU frame of both robots, [N,R,FRAME_DIM]."""
-        r = self.readings
-        return torch.cat([r["ir"].float(), r["line"].float(), self.env.action, r["battery"].unsqueeze(-1)], -1)
+        """Current MCU frame of both robots per the frozen interface, [N,R,FRAME_DIM]."""
+        r, pres = self.readings, self.present
+        side, enc, imu = pres[..., 0:1], pres[..., 1:2], pres[..., 2:3]
+        parts = {
+            "ir_front": r["ir"].float(),
+            "line": r["line"].float(),
+            "prev_action": self.env.action,
+            "battery": r["battery"].unsqueeze(-1),
+            "ir_side": r["ir_side"].float() * side,
+            "wheel_speed": r["wheel_speed"] / iface.WHEEL_SPEED_SCALE * enc,
+            "gyro_z": r["gyro_z"].unsqueeze(-1) / iface.GYRO_SCALE * imu,
+            "accel_xy": r["accel_xy"] / iface.ACCEL_SCALE * imu,
+            "has_side_ir": side,
+            "has_encoders": enc,
+            "has_imu": imu,
+        }
+        return torch.cat([parts[name] for name, _ in iface.FRAME], -1)
 
     def _push_frame(self) -> None:
         self.frames = torch.cat([self.frames[:, :, 1:], self._frame().unsqueeze(2)], 2)
 
     def obs(self, slot: int = 0) -> torch.Tensor:
-        """Actor obs of robot `slot` (its own sensors only), [N, stack·FRAME_DIM]."""
+        """Actor obs of robot `slot` (its own sensors only), [N, OBS_DIM]."""
         return self.frames[:, slot].flatten(1)
 
     def opp_category(self) -> torch.Tensor:
@@ -276,28 +315,32 @@ class SumoTask:
         return self.opp_type.clamp(max=self.n_fsm + 1)
 
     def critic_obs(self) -> torch.Tensor:
+        """Privileged critic input (layout fixed by sumo/interface.py: same with or without a policy pool)."""
         env, st, p = self.env, self.env.state, self.env.p
         R = p.ring_radius.unsqueeze(-1)  # [N,1]
         ctr = physics.centers(st, p)
         c, s = st.theta.cos(), st.theta.sin()
-        v_ref = self.omega0 * p.wheel_r
+        v_ref = (p.omega0 * p.wheel_r).unsqueeze(-1)
         rel = ctr[:, 1] - ctr[:, 0]
         rel_own = torch.stack([c[:, 0] * rel[:, 0] + s[:, 0] * rel[:, 1], -s[:, 0] * rel[:, 0] + c[:, 0] * rel[:, 1]], -1)
         rel_opp = torch.stack([-(c[:, 1] * rel[:, 0] + s[:, 1] * rel[:, 1]), s[:, 1] * rel[:, 0] - c[:, 1] * rel[:, 1]], -1)
         dth = st.theta[:, 1] - st.theta[:, 0]
+        is_fsm = self._is_fsm().float().unsqueeze(-1)
+        fsm_prm = torch.stack([self.fsm.prm[k] for k in sorted(self.fsm.prm)], -1) * is_fsm
         parts = [
             (ctr / R.unsqueeze(-1)).flatten(1), c, s, (st.vel / v_ref).flatten(1), st.omega / 10,
-            (st.wheel_w / self.omega0).flatten(1), st.u_lag.flatten(1), st.lift, st.wedge,
+            (st.wheel_w / p.omega0.unsqueeze(-1)).flatten(1), st.u_lag.flatten(1), st.lift, st.wedge,
             ctr.norm(dim=-1) / R, rel_own / R, rel_opp / R, torch.stack([dth.cos(), dth.sin()], -1),
             rel.norm(dim=-1, keepdim=True) / R, (1 - env.t / env.timeout).unsqueeze(-1),
-            torch.nn.functional.one_hot(self.opp_category(), self.n_fsm + (2 if self.pool else 1)).float(),
-            torch.nn.functional.one_hot(self.fsm.mode, 7).float() * self._is_fsm().float().unsqueeze(-1),
+            torch.nn.functional.one_hot(self.opp_category(), self.n_fsm + 2).float(),
+            torch.nn.functional.one_hot(self.fsm.mode, iface.N_FSM_MODES).float() * is_fsm,
+            fsm_prm, self.present.flatten(1), 1 / env.ctrl_dt.unsqueeze(-1) / 100,
+            *[getattr(p, name) for name in iface.CRITIC_ROBOT_PARAMS],
+            p.tau_stall.flatten(1),
+            *[getattr(p, name).unsqueeze(-1) for name in iface.CRITIC_ENV_PARAMS],
+            env.sensors.ir_range, env.sensors.ir_latency * 100, env.sensors.line_latency * 100,
             self.obs(),
         ]
-        for name, (lo, hi) in self.ranges:
-            if hi > lo:
-                v = (env.rand[name] - lo) / (hi - lo)
-                parts.append(v if v.dim() == 2 else v.unsqueeze(-1))
         return torch.cat(parts, -1)
 
     # --- step ------------------------------------------------------------------------------------------------------

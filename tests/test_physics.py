@@ -99,7 +99,7 @@ def test_push_against_wall_saturates_at_traction(spec):
     push = torch.stack([i["contact_normal_force"] for i in infos[-200:]]).mean().item()
     traction = 2 * (p.tire_mu * p.n_wheel)[0, 0].item()
     assert 0.8 * traction < push < 1.02 * traction
-    wheel_surface = (s.wheel_w[0, 0] * p.wheel_r).min().item()
+    wheel_surface = (s.wheel_w[0, 0] * p.wheel_r[0, 0]).min().item()
     assert wheel_surface > 0.2  # wheels keep spinning (slip) while the body is stopped
     assert s.vel[0, 0].norm() < 0.01
     assert max(i["contact_depth"].max().item() for i in infos) < 0.005
