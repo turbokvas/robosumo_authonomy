@@ -1,0 +1,6 @@
+﻿            stationary: win  83.4%  loss   0.0%  draw  16.6%
+            aggressive: win  90.8%  loss   5.2%  draw   4.0%
+  cautious_edge_waiter: win  96.6%  loss   1.0%  draw   2.4%
+               spinner: win  89.2%  loss   5.8%  draw   5.1%
+         random_walker: win  88.5%  loss   5.9%  draw   5.6%
+runs\m3_rl_v1_20261026_012848\ckpt_00500M.mp4

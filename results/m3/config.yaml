@@ -1,0 +1,50 @@
+# M3: RL v1 — PPO, asymmetric actor-critic, curriculum against FSM opponents.
+# Hardware/sensor/policy-shape parameters live in robot_spec.yaml; this file holds only training settings.
+
+run_name: m3_rl_v1
+seed: 0
+
+env:
+  num_envs: 4096
+  randomize: false                 # hardware *_rand off until M5 (FSM params and sensor noise are always on)
+
+reward:
+  win: 10.0
+  loss: -10.0
+  draw: -1.0
+  approach: 1.0                    # per metre the robots get closer
+  push: 3.0                        # per metre the opponent moves away from the ring centre while we are close
+  push_gate_dist: 0.3              # m between centres that counts as "close"
+  jerk: 0.02                       # per unit² change of the action between steps (not annealed)
+  shaping_anneal_steps: 400_000_000  # env-steps over which approach/push fade linearly to 0
+
+ppo:
+  total_steps: 1_500_000_000
+  rollout: 64                      # steps per env per update
+  gamma: 0.995                     # horizon ~2 s at 100 Hz
+  gae_lambda: 0.95
+  lr: 3.0e-4
+  epochs: 4
+  minibatches: 8
+  clip: 0.2
+  ent_coef: 0.002
+  vf_coef: 0.5
+  max_grad_norm: 1.0
+  init_log_std: -0.5
+  critic_hidden: [256, 256]
+
+curriculum:                        # promote when the win rate over the last `window` episodes reaches `promote_win_rate`
+  promote_win_rate: 0.8
+  window: 4096
+  stages:
+    - name: stationary
+      opponents: {stationary: 1.0}
+    - name: walker
+      opponents: {stationary: 0.2, random_walker: 0.8}
+    - name: all_fsm
+      opponents: {stationary: 0.05, random_walker: 0.15, aggressive: 0.3, cautious_edge_waiter: 0.2, spinner: 0.3}
+
+eval:
+  every_steps: 50_000_000
+  matches: 1024                    # per opponent type, deterministic policy (action = mean)
+  video_matches: 6

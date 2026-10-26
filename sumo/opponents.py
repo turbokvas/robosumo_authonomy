@@ -42,6 +42,7 @@ class FSM:
         """variant=None: every match draws a variant uniformly from spec opponent.variants."""
         self.variants: list[str] = get(spec, "opponent.variants")
         self.fixed_variant = None if variant is None else self.variants.index(variant)
+        self.weights: torch.Tensor | None = None  # sampling weights over variants on reset (None = uniform)
         self.ranges = {k[len(PARAM_PREFIX):]: v for k, v in rand_ranges(spec).items() if k.startswith(PARAM_PREFIX)}
         self.n, self.device, self.gen = n_envs, device, generator
         z = lambda dtype=torch.float32: torch.zeros(n_envs, device=device, dtype=dtype)  # noqa: E731
@@ -66,25 +67,26 @@ class FSM:
         return torch.where(self._rand(n) < 0.5, -1.0, 1.0)
 
     def reset(self, env_mask: torch.Tensor | None = None) -> None:
-        m = torch.ones(self.n, dtype=torch.bool, device=self.device) if env_mask is None else env_mask
-        k = int(m.sum())
+        if env_mask is None:
+            env_mask = torch.ones(self.n, dtype=torch.bool, device=self.device)
+        self.reset_idx(env_mask.nonzero().squeeze(-1))
+
+    def reset_idx(self, idx: torch.Tensor) -> None:
+        """New match for envs `idx` (long): fresh variant (unless fixed), parameters and state. No host syncs."""
+        k = idx.numel()
         if k == 0:
             return
         if self.fixed_variant is None:
-            self.variant[m] = torch.randint(len(self.variants), (k,), device=self.device, generator=self.gen)
+            w = torch.ones(len(self.variants), device=self.device) if self.weights is None else self.weights
+            self.variant.index_copy_(0, idx, torch.multinomial(w, k, replacement=True, generator=self.gen))
         else:
-            self.variant[m] = self.fixed_variant
+            self.variant.index_fill_(0, idx, self.fixed_variant)
         for name, (lo, hi) in self.ranges.items():
-            self.prm[name][m] = lo + (hi - lo) * self._rand(k)
-        self.mode[m] = SEARCH
-        self.timer[m] = 0
-        self.esc_dir[m] = self._sign(k)
-        self.last_dir[m] = self._sign(k)
-        self.spin_dir[m] = self._sign(k)
-        self.arc_dir[m] = self._sign(k)
-        self.clock[m] = 0
-        self.engaged[m] = 0
-        self.wander_timer[m] = 0
+            self.prm[name].index_copy_(0, idx, lo + (hi - lo) * self._rand(k))
+        for t in (self.mode, self.timer, self.clock, self.engaged, self.wander_timer):
+            t.index_fill_(0, idx, SEARCH if t is self.mode else 0)
+        for t in (self.esc_dir, self.last_dir, self.spin_dir, self.arc_dir):
+            t.index_copy_(0, idx, self._sign(k))
 
     def is_variant(self, name: str) -> torch.Tensor:
         return self.variant == self.variants.index(name)

@@ -25,7 +25,7 @@ _IR, _XT, _LINE = slice(0, N_IR), slice(N_IR, 2 * N_IR), slice(2 * N_IR, 2 * N_I
 
 def ray_box_distance(o: torch.Tensor, d: torch.Tensor, half: tuple[float, float]) -> torch.Tensor:
     """Slab test in the box frame. o, d: [..., 2] (d unit). Distance to the box along the ray, inf if missed."""
-    h = torch.tensor(half, device=o.device, dtype=o.dtype)
+    h = physics.const(tuple(half), o.device, o.dtype)
     d_safe = torch.where(d.abs() < 1e-9, torch.full_like(d, 1e-9), d)
     t1, t2 = (-h - o) / d_safe, (h - o) / d_safe
     t_near = torch.minimum(t1, t2).amax(-1)
@@ -67,11 +67,12 @@ class Sensors:
         self.substeps = round(1 / (get(spec, "controller.control_rate_hz") * get(spec, "controller.physics_dt_s")))
         self.hist_len = math.ceil(lat_max * rate_max * self.substeps) + 2
         self.hist = torch.zeros(self.hist_len, n_envs, physics.N_ROBOTS, 2 * N_IR + N_LINE, dtype=torch.bool, device=device)
-        self.head = 0
+        self.head = torch.zeros(1, dtype=torch.long, device=device)  # device-side, so push() is graph-capturable
         self._n = torch.arange(n_envs, device=device).view(-1, 1)
         self._r = torch.arange(physics.N_ROBOTS, device=device).view(1, -1)
 
     def set_params(self, rand: RandomizationBatch) -> None:
+        """Views into the randomization batch; it is updated in place on reset, so these stay current."""
         self.ir_range = rand["robot.sensors.opponent_ir.range"]
         self.ir_latency = rand["robot.sensors.opponent_ir.latency_s"]
         self.line_latency = rand["robot.sensors.edge.latency_s"]
@@ -110,16 +111,16 @@ class Sensors:
         return torch.cat([beam, xt, line], -1)
 
     def push(self, state: physics.PhysState, p: physics.PhysParams) -> None:
-        self.hist[self.head] = self.geometry(state, p)
-        self.head = (self.head + 1) % self.hist_len
+        self.hist.index_copy_(0, self.head, self.geometry(state, p).unsqueeze(0))
+        self.head.add_(1).remainder_(self.hist_len)
 
-    def prime(self, state: physics.PhysState, p: physics.PhysParams, env_mask: torch.Tensor | None = None) -> None:
+    def prime(self, state: physics.PhysState, p: physics.PhysParams, env_idx: torch.Tensor | None = None) -> None:
         """Fill the whole history with the current geometry (after a reset), so latency reads stay valid."""
         g = self.geometry(state, p)
-        if env_mask is None:
+        if env_idx is None:
             self.hist[:] = g
         else:
-            self.hist[:, env_mask] = g[env_mask]
+            self.hist[:, env_idx] = g[env_idx]
 
     def _delayed(self, latency: torch.Tensor, substep_dt: torch.Tensor, ch: slice) -> torch.Tensor:
         delay = (latency / substep_dt.view(-1, 1)).round().long().clamp(0, self.hist_len - 1)  # [N,R]
