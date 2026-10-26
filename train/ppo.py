@@ -1,15 +1,20 @@
 """PPO with an asymmetric actor-critic, CleanRL style: one file, everything on the GPU.
 
     uv run python -m train.ppo --config configs/m3.yaml
+    uv run python -m train.ppo --resume runs/<run>/ckpt_latest.pt      # continue after a crash / power loss
 
 Robot 0 learns; robot 1 is an FSM variant or a stationary target, sampled per episode from the current curriculum
-stage. Each checkpoint stores actor/critic/optimizer, both configs and the git hash.
+stage (M3), or — with a `league` section in the config (M4) — any of those plus frozen snapshots of the policy,
+sampled by PFSP. Each checkpoint stores actor/critic/optimizer, curriculum/league state, both configs and the git
+hash; ckpt_latest.pt is rewritten atomically every `checkpoint_every_steps`, so a run survives a power cut.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
+import sys
 import subprocess
 import time
 from pathlib import Path
@@ -19,8 +24,9 @@ import yaml
 from torch.utils.tensorboard import SummaryWriter
 
 from sumo.config import SPEC_PATH, get, load_spec
-from sumo.env import SumoTask
+from sumo.env import DRAW, FRAME_DIM, SumoTask
 from train.eval import evaluate, video
+from train.league import League, PolicyPool
 from train.models import Actor, Critic
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -60,40 +66,81 @@ class WinWindow:
 
 
 def main() -> None:
+    sys.stdout.reconfigure(encoding="utf-8")  # Windows consoles/pipes default to cp1251
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", required=True)
+    ap.add_argument("--config", default=None, help="training config (taken from the checkpoint with --resume)")
+    ap.add_argument("--resume", default=None, help="continue a run from its checkpoint (same run dir)")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--total-steps", type=int, default=None, help="override ppo.total_steps (smoke tests)")
+    ap.add_argument("--init", default=None, help="checkpoint to start the actor from (overrides cfg init_ckpt)")
     args = ap.parse_args()
 
-    cfg = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
-    spec = load_spec()
-    pc, rc, cc, ec = cfg["ppo"], cfg["reward"], cfg["curriculum"], cfg["eval"]
+    ckpt = torch.load(args.resume, map_location=args.device, weights_only=False) if args.resume else None
+    if args.config:
+        cfg = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
+    elif ckpt:
+        cfg = ckpt["cfg"]
+    else:
+        ap.error("--config or --resume is required")
+    spec = ckpt["spec"] if ckpt else load_spec()
+    pc, rc, cc, ec = cfg["ppo"], cfg["reward"], cfg.get("curriculum"), cfg["eval"]
     total = args.total_steps or pc["total_steps"]
     dev = args.device
     torch.manual_seed(cfg["seed"])
 
-    run_dir = ROOT / "runs" / f"{cfg['run_name']}_{time.strftime('%Y%m%d_%H%M%S')}"
-    run_dir.mkdir(parents=True)
-    shutil.copy(args.config, run_dir / "config.yaml")
-    shutil.copy(SPEC_PATH, run_dir / "robot_spec.yaml")
     commit = git_hash()
-    (run_dir / "git_hash.txt").write_text(commit + "\n")
+    if ckpt:
+        run_dir = Path(args.resume).resolve().parent
+        with open(run_dir / "git_hash.txt", "a") as f:
+            f.write(f"resumed at step {ckpt['step']:,}: {commit}\n")
+    else:
+        run_dir = ROOT / "runs" / f"{cfg['run_name']}_{time.strftime('%Y%m%d_%H%M%S')}"
+        run_dir.mkdir(parents=True)
+        shutil.copy(args.config, run_dir / "config.yaml")
+        shutil.copy(SPEC_PATH, run_dir / "robot_spec.yaml")
+        (run_dir / "git_hash.txt").write_text(commit + "\n")
     writer = SummaryWriter(str(run_dir))
     print(f"run: {run_dir}  (git {commit})")
 
     n, T = cfg["env"]["num_envs"], pc["rollout"]
-    task = SumoTask(spec, cfg, n, dev, cfg["seed"])
-    stages = cc["stages"]
+    hidden = get(spec, "controller.policy.hidden")
+    lc = cfg.get("league")
+    pool = PolicyPool(lc["pool_size"], get(spec, "controller.policy.obs_frame_stack") * FRAME_DIM, hidden, dev) if lc else None
+    task = SumoTask(spec, cfg, n, dev, cfg["seed"], pool=pool)
+    stages = cc["stages"] if cc else [{"name": "league", "opponents": {}}]
     stage = 0
-    task.set_opponents(stages[stage]["opponents"])
-    task._new_episodes(torch.ones(n, dtype=torch.bool, device=dev))
-    window = WinWindow(cc["window"], dev)
+    league = League(task.opp_names, pool, lc, dev) if lc else None
+    if not league:
+        task.set_opponents(stages[stage]["opponents"])
+    window = WinWindow(cc["window"], dev) if cc else None
 
     obs_dim, cobs_dim = task.obs().shape[1], task.critic_obs().shape[1]
-    actor = Actor(obs_dim, get(spec, "controller.policy.hidden"), init_log_std=pc["init_log_std"]).to(dev)
+    actor = Actor(obs_dim, hidden, init_log_std=pc["init_log_std"]).to(dev)
     critic = Critic(cobs_dim, pc["critic_hidden"]).to(dev)
+    init = None if ckpt else (args.init or cfg.get("init_ckpt"))
+    if init:
+        actor.load_state_dict(torch.load(ROOT / init, map_location=dev, weights_only=False)["actor"])
+        with torch.no_grad():
+            actor.log_std.fill_(pc["init_log_std"])
+        print(f"actor initialised from {init}")
     opt = torch.optim.Adam([*actor.parameters(), *critic.parameters()], lr=pc["lr"], eps=1e-5)
+    step = 0
+    if ckpt:
+        actor.load_state_dict(ckpt["actor"])
+        critic.load_state_dict(ckpt["critic"])
+        opt.load_state_dict(ckpt["opt"])
+        step, stage = ckpt["step"], ckpt["stage"]
+        if league and "league" in ckpt:
+            league.load_state(ckpt["league"])
+        if not league:
+            task.set_opponents(stages[stage]["opponents"])
+        print(f"resumed {args.resume} at step {step:,}, stage {stages[stage]['name']}")
+    elif league:
+        print("pool:", league.add_snapshot(actor, "init"), "= anchor (initial policy)")
+    if league:
+        task.opp_weights = league.weights()
+    task._new_episodes(torch.ones(n, dtype=torch.bool, device=dev))
+    warmup = pc.get("critic_warmup_updates", 0) if init else 0
     print(f"actor obs {obs_dim}, critic obs {cobs_dim}, actor params {sum(p.numel() for p in actor.parameters()):,}")
 
     buf = {
@@ -105,21 +152,31 @@ def main() -> None:
         "rew": torch.zeros(T, n, device=dev),
         "done": torch.zeros(T, n, device=dev),
     }
-    n_opp = len(task.opp_names)
-    stats = torch.zeros(n_opp, 3, device=dev)  # per opponent: wins, losses, draws since last log
+    stat_names = task.opp_names[: task.n_fsm + 1] + (["pool"] if league else [])
+    n_opp = len(stat_names)
+    stats = torch.zeros(n_opp, 3, device=dev)  # per opponent (all pool policies pooled): wins, losses, draws
     ep_len_sum = torch.zeros((), device=dev)
 
-    def save(tag: str) -> Path:
-        path = run_dir / f"ckpt_{tag}.pt"
-        torch.save({
+    def save(tag: str | None) -> Path:
+        """Write ckpt_<tag>.pt (if tag) and ckpt_latest.pt, each via a temp file + atomic rename."""
+        state = {
             "actor": actor.state_dict(), "critic": critic.state_dict(), "opt": opt.state_dict(),
             "step": step, "stage": stage, "obs_dim": obs_dim, "cobs_dim": cobs_dim,
             "cfg": cfg, "spec": spec, "git": commit,
-        }, path)
-        shutil.copy(path, run_dir / "ckpt_latest.pt")
-        return path
+        }
+        if league:
+            state["league"] = league.state()
+        paths = [run_dir / "ckpt_latest.pt"] + ([run_dir / f"ckpt_{tag}.pt"] if tag else [])
+        for path in paths:
+            tmp = path.with_suffix(".tmp")
+            torch.save(state, tmp)
+            os.replace(tmp, path)
+        return paths[-1]
 
-    step, next_eval, update = 0, ec["every_steps"], 0
+    ev, ck = ec["every_steps"], cfg.get("checkpoint_every_steps", 10_000_000)
+    next_eval, next_ckpt, update = (step // ev + 1) * ev, (step // ck + 1) * ck, 0
+    next_snapshot = (step // lc["snapshot_steps"] + 1) * lc["snapshot_steps"] if lc else 0
+    t_resume = step
     t_start = time.perf_counter()
     while step < total:
         task.shaping_scale = max(0.0, 1.0 - step / rc["shaping_anneal_steps"])
@@ -137,9 +194,13 @@ def main() -> None:
                 if done.any():
                     w, o = info["winner"][done], info["opp_type"][done]
                     outcome = torch.where(w == 0, 0, torch.where(w == 1, 1, 2))
-                    stats.index_put_((o, outcome), torch.ones_like(o, dtype=torch.float), accumulate=True)
+                    cat = o.clamp(max=n_opp - 1)
+                    stats.index_put_((cat, outcome), torch.ones_like(o, dtype=torch.float), accumulate=True)
                     ep_len_sum += info["ep_len"][done].sum()
-                    window.add(w == 0)
+                    if window:
+                        window.add(w == 0)
+                    if league:
+                        league.record(o, w == 0, w == DRAW)
             last_val = critic(task.critic_obs())
 
             adv = torch.zeros_like(buf["rew"])
@@ -169,7 +230,9 @@ def main() -> None:
                 pg = torch.max(-a_mb * ratio, -a_mb * ratio.clamp(1 - pc["clip"], 1 + pc["clip"])).mean()
                 v_loss = 0.5 * (critic(flat["cobs"][idx]) - flat_ret[idx]).pow(2).mean()
                 ent = d.entropy().sum(-1).mean()
-                loss = pg + pc["vf_coef"] * v_loss - pc["ent_coef"] * ent
+                loss = pc["vf_coef"] * v_loss
+                if update >= warmup:  # with a pretrained actor, let the fresh critic catch up first
+                    loss = loss + pg - pc["ent_coef"] * ent
                 opt.zero_grad(set_to_none=True)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_([*actor.parameters(), *critic.parameters()], pc["max_grad_norm"])
@@ -179,8 +242,15 @@ def main() -> None:
         step += batch
         update += 1
 
+        # league: PFSP weights, periodic snapshots
+        if league:
+            if step >= next_snapshot:
+                next_snapshot += lc["snapshot_steps"]
+                print(f"[{step:,}] snapshot → {league.add_snapshot(actor, f'{step // 1_000_000}M')}")
+            task.opp_weights = league.weights()
+
         # curriculum
-        rate = window.rate()
+        rate = window.rate() if window else None
         if rate is not None and rate >= cc["promote_win_rate"] and stage < len(stages) - 1:
             stage += 1
             task.set_opponents(stages[stage]["opponents"])
@@ -188,8 +258,12 @@ def main() -> None:
             print(f"[{step:,}] curriculum → {stages[stage]['name']} (window win rate {rate:.1%})")
             save(f"stage{stage}_{stages[stage]['name']}")
 
+        if step >= next_ckpt:
+            next_ckpt += ck
+            save(None)
+
         if update % 10 == 0:
-            sps = step / (time.perf_counter() - t_start)
+            sps = (step - t_resume) / (time.perf_counter() - t_start)
             writer.add_scalar("perf/sps", sps, step)
             writer.add_scalar("perf/rollout_s", rollout_s, step)
             writer.add_scalar("loss/policy", pg.item(), step)
@@ -203,7 +277,10 @@ def main() -> None:
             if eps:
                 writer.add_scalar("train/episode_len_s", ep_len_sum.item() / eps / 100, step)
                 parts = []
-                for i, name in enumerate(task.opp_names):
+                if league:
+                    for i in range(league.n_fixed, league.n_fixed + pool.size):
+                        writer.add_scalar(f"league_win/{pool.names[i - league.n_fixed]}", league.win[i].item(), step)
+                for i, name in enumerate(stat_names):
                     tot = stats[i].sum().item()
                     if tot:
                         wr = stats[i, 0].item() / tot
@@ -218,8 +295,8 @@ def main() -> None:
             next_eval += ec["every_steps"]
             actor.eval()
             res = {}
-            for name in task.opp_names:
-                r = evaluate(actor, spec, cfg, name, ec["matches"], dev)
+            for name in task.opp_names[: task.n_fsm + 1] + (["pool0"] if league else []):
+                r = evaluate(actor, spec, cfg, name, ec["matches"], dev, pool=pool)
                 res[name] = r["win"]
                 writer.add_scalar(f"eval_win/{name}", r["win"], step)
                 writer.add_scalar(f"eval_draw/{name}", r["draw"], step)

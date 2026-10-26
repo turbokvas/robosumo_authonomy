@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -28,9 +29,13 @@ def evaluate(
     device: str,
     seed: int = 12345,
     record: int = 0,
+    pool: Any = None,
 ) -> dict[str, Any]:
-    """Win/loss/draw rates of `actor` (robot 0) vs `opponent` over `matches` first episodes."""
-    task = SumoTask(spec, cfg, matches, device, seed)
+    """Win/loss/draw rates of `actor` (robot 0) vs `opponent` over `matches` first episodes.
+
+    opponent: "stationary", an FSM variant, or "pool<i>" (a frozen policy in `pool`, train.league.PolicyPool).
+    """
+    task = SumoTask(spec, cfg, matches, device, seed, pool=pool)
     task.set_opponents({opponent: 1.0})
     task._new_episodes(torch.ones(matches, dtype=torch.bool, device=device))
     result = torch.full((matches,), DRAW, dtype=torch.long, device=device)
@@ -86,6 +91,7 @@ def load_actor(ckpt_path: str | Path, device: str) -> tuple[Actor, dict, dict]:
 
 
 def main() -> None:
+    sys.stdout.reconfigure(encoding="utf-8")  # Windows consoles/pipes default to cp1251
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--matches", type=int, default=2048)

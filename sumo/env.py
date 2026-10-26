@@ -185,7 +185,10 @@ FRAME_DIM = 10  # 3 IR + 4 line + previous action (2) + battery
 
 
 class SumoTask:
-    """RL view of a match: robot 0 = learner, robot 1 = opponent (an FSM variant or a stationary target).
+    """RL view of a match: robot 0 = learner, robot 1 = opponent.
+
+    Opponent types: "stationary", the FSM variants, and (when a policy pool is attached, M4) frozen policy
+    snapshots "pool0".."poolK-1" that see robot 1's own actor obs.
 
     Actor obs = only what the robot's MCU has: frame stack of [3 IR, 4 line, previous applied action (2), battery].
     Critic obs = privileged state of both robots, randomization, opponent type and FSM mode (sim only).
@@ -194,15 +197,26 @@ class SumoTask:
     Finished envs auto-reset; the obs returned for them belong to the new episode.
     """
 
-    def __init__(self, spec: dict[str, Any], cfg: dict[str, Any], num_envs: int, device: str | torch.device, seed: int):
+    def __init__(
+        self,
+        spec: dict[str, Any],
+        cfg: dict[str, Any],
+        num_envs: int,
+        device: str | torch.device,
+        seed: int,
+        pool: Any = None,
+    ):
+        """pool: object with `capacity` and `act(obs [N,D], slot [N]) -> [N,2]` (train.league.PolicyPool)."""
         self.spec, self.n, self.device = spec, num_envs, device
         self.env = SumoEnv(spec, num_envs, device, randomize=cfg["env"]["randomize"], seed=seed)
         self.fsm = FSM(spec, num_envs, device, None, self.env.gen)
-        self.opp_names = [STATIONARY] + self.fsm.variants
+        self.pool = pool
+        self.n_fsm = len(self.fsm.variants)
+        self.opp_names = [STATIONARY] + self.fsm.variants + [f"pool{i}" for i in range(pool.capacity if pool else 0)]
         self.opp_weights = torch.ones(len(self.opp_names), device=device)
         self.opp_type = torch.zeros(num_envs, dtype=torch.long, device=device)
         self.stack = get(spec, "controller.policy.obs_frame_stack")
-        self.frames = torch.zeros(num_envs, self.stack, FRAME_DIM, device=device)
+        self.frames = torch.zeros(num_envs, physics.N_ROBOTS, self.stack, FRAME_DIM, device=device)
         self.rew = cfg["reward"]
         self.shaping_scale = 1.0
         self.ranges = sorted(rand_ranges(spec).items())
@@ -236,7 +250,7 @@ class SumoTask:
         for key in self.readings:
             mm = m.view(-1, *([1] * (fresh[key].dim() - 1)))
             self.readings[key] = torch.where(mm, fresh[key], self.readings[key])
-        self.frames = torch.where(m.view(-1, 1, 1), torch.zeros_like(self.frames), self.frames)
+        self.frames = torch.where(m.view(-1, 1, 1, 1), torch.zeros_like(self.frames), self.frames)
         self.prev_raw = torch.where(m.view(-1, 1), torch.zeros_like(self.prev_raw), self.prev_raw)
         self.ep_len = torch.where(m, torch.zeros_like(self.ep_len), self.ep_len)
         self._push_frame()
@@ -244,14 +258,20 @@ class SumoTask:
 
     # --- observations ----------------------------------------------------------------------------------------------
     def _frame(self) -> torch.Tensor:
+        """Current MCU frame of both robots, [N,R,FRAME_DIM]."""
         r = self.readings
-        return torch.cat([r["ir"][:, 0].float(), r["line"][:, 0].float(), self.env.action[:, 0], r["battery"][:, :1]], -1)
+        return torch.cat([r["ir"].float(), r["line"].float(), self.env.action, r["battery"].unsqueeze(-1)], -1)
 
     def _push_frame(self) -> None:
-        self.frames = torch.cat([self.frames[:, 1:], self._frame().unsqueeze(1)], 1)
+        self.frames = torch.cat([self.frames[:, :, 1:], self._frame().unsqueeze(2)], 2)
 
-    def obs(self) -> torch.Tensor:
-        return self.frames.flatten(1)
+    def obs(self, slot: int = 0) -> torch.Tensor:
+        """Actor obs of robot `slot` (its own sensors only), [N, stack·FRAME_DIM]."""
+        return self.frames[:, slot].flatten(1)
+
+    def opp_category(self) -> torch.Tensor:
+        """0 = stationary, 1..n_fsm = FSM variant, n_fsm+1 = any pool policy."""
+        return self.opp_type.clamp(max=self.n_fsm + 1)
 
     def critic_obs(self) -> torch.Tensor:
         env, st, p = self.env, self.env.state, self.env.p
@@ -268,8 +288,8 @@ class SumoTask:
             (st.wheel_w / self.omega0).flatten(1), st.u_lag.flatten(1), st.lift, st.wedge,
             ctr.norm(dim=-1) / R, rel_own / R, rel_opp / R, torch.stack([dth.cos(), dth.sin()], -1),
             rel.norm(dim=-1, keepdim=True) / R, (1 - env.t / env.timeout).unsqueeze(-1),
-            torch.nn.functional.one_hot(self.opp_type, len(self.opp_names)).float(),
-            torch.nn.functional.one_hot(self.fsm.mode, 7).float() * (self.opp_type > 0).float().unsqueeze(-1),
+            torch.nn.functional.one_hot(self.opp_category(), self.n_fsm + (2 if self.pool else 1)).float(),
+            torch.nn.functional.one_hot(self.fsm.mode, 7).float() * self._is_fsm().float().unsqueeze(-1),
             self.obs(),
         ]
         for name, (lo, hi) in self.ranges:
@@ -279,6 +299,9 @@ class SumoTask:
         return torch.cat(parts, -1)
 
     # --- step ------------------------------------------------------------------------------------------------------
+    def _is_fsm(self) -> torch.Tensor:
+        return (self.opp_type > 0) & (self.opp_type <= self.n_fsm)
+
     def _geometry(self) -> tuple[torch.Tensor, torch.Tensor]:
         ctr = physics.centers(self.env.state, self.env.p)
         return (ctr[:, 0] - ctr[:, 1]).norm(dim=-1), ctr[:, 1].norm(dim=-1)
@@ -287,6 +310,10 @@ class SumoTask:
         """action [N,2] for robot 0 → (reward [N], done [N], info). Obs for the next step via obs()/critic_obs()."""
         raw = action.clamp(-1, 1)
         opp = self.fsm.act(self.readings["ir"][:, 1], self.readings["line"][:, 1], self.env.ctrl_dt)
+        if self.pool is not None and self.pool.size > 0:
+            slot = (self.opp_type - self.n_fsm - 1).clamp(min=0)
+            pol = self.pool.act(self.obs(1), slot)
+            opp = torch.where((self.opp_type > self.n_fsm).unsqueeze(-1), pol, opp)
         opp = torch.where((self.opp_type == 0).unsqueeze(-1), torch.zeros_like(opp), opp)
         self.readings, done, winner = self.env.step(torch.stack([raw, opp], 1))
         self.ep_len += 1
