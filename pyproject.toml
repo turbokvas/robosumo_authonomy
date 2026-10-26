@@ -10,13 +10,23 @@ dependencies = [
     "tensorboard",
     "matplotlib",
     "pygame",
+    "mujoco>=3.17.0",
+    "warp-lang>=1.18.0",
+    "mujoco-warp>=3.17.0",
 ]
 
 [dependency-groups]
 dev = ["pytest"]
+tools = [
+    "cascadio>=0.1.1",
+    "scipy>=1.18.1",
+    "shapely>=2.2.0",
+    "trimesh>=5.2.0",
+]
 
 [tool.uv]
 package = false
+default-groups = ["dev", "tools"]  # tools: STEP → mesh pipeline (sim3d assets)
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu128" }

@@ -8,7 +8,7 @@ RL-політика для 3-кг робота сумо. Тренування в
 (єдине джерело правди: жодних магічних чисел у коді, все читається звідти).
 
 ## Залізо (коротко)
-- 3 кг, 200×200×130 мм, клин спереду, 2 колеса ⌀70 мм позаду, колія 150 мм, ЦМ ~2 см попереду осі.
+- 3 кг, 190×199×99 мм (CAD: `sim3d/assets/robot_mdl.step`), клин спереду, 2 колеса ⌀70 мм позаду, колія 149 мм, ЦМ ~2 см попереду осі.
 - Мотори JGY-370 (черв'як, 1:40, самогальмування), 4S LiPo (14-16.8 В). Зчеплення слабше за мотори: повний газ = пробуксовка.
 - Сенсори: 3× E18-D80NK (цифрові промені, 0° і ±15°), 4 line-сенсори в кутах квадрата 170 мм.
 - МК: ще не обрано — мінімум ESP32, бажано STM32 (обидва з FPU). Nano (торішній робот) НЕ ціль, під нього не обмежуємось.
@@ -36,7 +36,7 @@ sumo/
   env.py           # SumoEnv: reset/step, obs/critic_obs, rewards, термінації
   render.py        # відео матчів
   match.py         # FSM проти FSM: win-rate, матриця, відео
-sim3d/             # M6: MJCF-модель, середовище на MuJoCo Warp з тим самим інтерфейсом obs/action
+sim3d/             # 3D: build_assets (STEP→меші/бокси), model (MJCF), env3d (SumoEnv3D, той самий інтерфейс), render3d
 train/
   ppo.py           # PPO + asymmetric actor-critic
   league.py        # self-play пул суперників
@@ -76,4 +76,7 @@ runs/              # чекпоінти + конфіг + git hash (в .gitignore
 - `uv run python -m train.ppo --config configs/m3.yaml` — тренування (tensorboard: `uv run tensorboard --logdir runs`)
 - `uv run python -m train.eval --ckpt runs/<run>/ckpt_latest.pt [--video 2]` — win-rate проти всіх суперників
 - `uv run python scripts/bench_env.py --n 4096` — швидкість середовища
+- `uv run python -m sim3d.build_assets` — перегенерувати 3D-ассети з STEP (після змін у Fusion)
+- `uv run python -m train.eval --ckpt ... --sim 3d` — оцінка в 3D; `uv run python -m sim3d.render3d --ckpt ... --out x.mp4` — 3D-відео
+- 3D-тренування: `env.sim: 3d` у конфігу (див. `configs/m4_3d_test.yaml`)
 - `uv run python -m export.export --ckpt ...`
