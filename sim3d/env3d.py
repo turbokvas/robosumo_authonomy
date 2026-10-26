@@ -192,7 +192,7 @@ class SumoEnv3D:
         import numpy as np
 
         for name in ("body_mass", "body_ipos", "body_inertia", "geom_friction", "geom_size", "geom_rbound",
-                     "actuator_gainprm", "actuator_biasprm", "dof_damping"):
+                     "actuator_gainprm", "actuator_biasprm", "dof_damping", "body_pos"):
             a = getattr(self.mm, name)
             setattr(self.mm, name, wp.array(np.repeat(a.numpy(), self.n, axis=0), dtype=a.dtype))
         t = wp.to_torch
@@ -200,6 +200,7 @@ class SumoEnv3D:
         self.m_friction, self.m_size, self.m_rbound = t(self.mm.geom_friction), t(self.mm.geom_size), t(self.mm.geom_rbound)
         self.m_gain, self.m_bias = t(self.mm.actuator_gainprm), t(self.mm.actuator_biasprm)
         self.m_damping = t(self.mm.dof_damping)
+        self.m_body_pos = t(self.mm.body_pos)
 
     def _index_model(self) -> None:
         m = self.mjm
@@ -221,7 +222,9 @@ class SumoEnv3D:
         self.wheel_geoms = [[g for g in range(m.ngeom) if m.geom_bodyid[g] in self.wheel_body[r]] for r in range(2)]
         self.body_geoms = [[g for g in range(m.ngeom) if m.geom_bodyid[g] == self.body_id[r] and m.geom_contype[g]]
                            for r in range(2)]
-        self.has_floor = m.geom("dohyo").type != mujoco.mjtGeom.mjGEOM_PLANE
+        self.wheel_half_w = float(m.geom_size[self.wheel_geoms[0][0]][1])
+        geo = load_geometry()
+        self.axle_z, self.cad_wheel_r = geo["axle_z"], geo["wheel_radius"]
         self.dohyo = m.geom("dohyo").id
         self.dohyo_halfh = float(m.geom_size[self.dohyo][1])
 
@@ -243,6 +246,12 @@ class SumoEnv3D:
             self.m_inertia[idx, b] = box * mb[:, r:r + 1] / 12
             for g in self.wheel_geoms[r]:
                 self.m_friction[idx, g, 0] = p.tire_mu[idx, r]
+                # wheel radius (M5 randomization). The axle mount moves with the wheel so the ride height stays
+                # (fitting Ø60 wheels on the Ø70 axle would sit the 1.4-3 mm underbody on the ring)
+                self.m_size[idx, g, 0] = p.wheel_r[idx, r]
+                self.m_rbound[idx, g] = torch.sqrt(p.wheel_r[idx, r] ** 2 + self.wheel_half_w**2)
+            for wb in self.wheel_body[r]:
+                self.m_body_pos[idx, wb, 2] = self.axle_z + (p.wheel_r[idx, r] - self.cad_wheel_r)
             for g in self.body_geoms[r]:
                 self.m_friction[idx, g, 0] = p.scoop_mu[idx, r]
             for w in range(2):
