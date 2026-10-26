@@ -4,7 +4,7 @@
 
 run_name: m5_robust_3d
 seed: 1
-init_ckpt: results/m4_3d_test/ckpt_00300M.pt   # M4 after 300M steps of 3D
+init_ckpt: results/m5_pre_blade_fix/ckpt_00400M.pt   # M5 400M on the old blade (blunt end face), already used to randomization
 
 env:
   sim: 3d                          # MuJoCo Warp (sim3d/env3d.py)

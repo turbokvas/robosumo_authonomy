@@ -192,7 +192,7 @@ class SumoEnv3D:
         import numpy as np
 
         for name in ("body_mass", "body_ipos", "body_inertia", "geom_friction", "geom_size", "geom_rbound",
-                     "actuator_gainprm", "actuator_biasprm", "dof_damping", "body_pos"):
+                     "actuator_gainprm", "actuator_biasprm", "dof_damping", "body_pos", "geom_pos"):
             a = getattr(self.mm, name)
             setattr(self.mm, name, wp.array(np.repeat(a.numpy(), self.n, axis=0), dtype=a.dtype))
         t = wp.to_torch
@@ -201,6 +201,7 @@ class SumoEnv3D:
         self.m_gain, self.m_bias = t(self.mm.actuator_gainprm), t(self.mm.actuator_biasprm)
         self.m_damping = t(self.mm.dof_damping)
         self.m_body_pos = t(self.mm.body_pos)
+        self.m_geom_pos = t(self.mm.geom_pos)
 
     def _index_model(self) -> None:
         m = self.mjm
@@ -225,6 +226,9 @@ class SumoEnv3D:
         self.wheel_half_w = float(m.geom_size[self.wheel_geoms[0][0]][1])
         geo = load_geometry()
         self.axle_z, self.cad_wheel_r = geo["axle_z"], geo["wheel_radius"]
+        self.edge_geom = [m.geom(f"{r}_edge").id for r in ROBOTS]
+        self.edge_tip_x = geo["blade_edge"]["x"] + geo["blade_edge"]["radius"]
+        self.edge_half_len = float(m.geom_size[self.edge_geom[0]][1])
         self.dohyo = m.geom("dohyo").id
         self.dohyo_halfh = float(m.geom_size[self.dohyo][1])
 
@@ -232,7 +236,8 @@ class SumoEnv3D:
         """Push the (randomized) physical parameters of worlds idx into the MuJoCo model."""
         p = self.p
         mb = (1 / p.inv_mass[idx]) * (1 - 2 * self.wheel_share)  # [k,R] body share of the whole robot's mass
-        com_z = get(self.spec, "sim.sim3d.com_height")
+        com_h = self.rand["robot.com_height"][idx]  # [k,R]
+        edge_r = get(self.spec, "sim.sim3d.blade_edge_radius") + p.clearance[idx]  # blunter edge: higher axis
         L, W = self.half[0] * 2, self.half[1] * 2
         H = load_geometry()["body_height"]
         for r in range(physics.N_ROBOTS):
@@ -240,7 +245,7 @@ class SumoEnv3D:
             self.m_mass[idx, b] = mb[:, r]
             for wb in self.wheel_body[r]:  # body + 2 wheels = robot.mass exactly
                 self.m_mass[idx, wb] = (1 / p.inv_mass[idx, r]) * self.wheel_share
-            ipos = torch.stack([p.com_x[idx, r], torch.zeros_like(mb[:, r]), torch.full_like(mb[:, r], com_z)], -1)
+            ipos = torch.stack([p.com_x[idx, r], torch.zeros_like(mb[:, r]), com_h[:, r]], -1)
             self.m_ipos[idx, b] = ipos
             box = torch.tensor([W**2 + H**2, L**2 + H**2, L**2 + W**2], device=mb.device, dtype=mb.dtype)
             self.m_inertia[idx, b] = box * mb[:, r:r + 1] / 12
@@ -254,6 +259,12 @@ class SumoEnv3D:
                 self.m_body_pos[idx, wb, 2] = self.axle_z + (p.wheel_r[idx, r] - self.cad_wheel_r)
             for g in self.body_geoms[r]:
                 self.m_friction[idx, g, 0] = p.scoop_mu[idx, r]
+            # blade edge: front stays at the CAD tip, bottom on the ring (the plates start inside it)
+            e, er = self.edge_geom[r], edge_r[:, r]
+            self.m_size[idx, e, 0] = er
+            self.m_rbound[idx, e] = er + self.edge_half_len
+            self.m_geom_pos[idx, e, 0] = self.edge_tip_x - er
+            self.m_geom_pos[idx, e, 2] = er
             for w in range(2):
                 tau = p.tau_stall[idx, r, w]
                 self.m_gain[idx, self.motor[r][w], 0] = tau
