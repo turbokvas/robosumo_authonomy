@@ -1,0 +1,154 @@
+# Єдине джерело правди для симу, тренування і прошивки.
+# Усі одиниці — SI (м, кг, с, рад, Н, Н·м), якщо не вказано інше.
+# Поля з "rand" — діапазони для domain randomization (рівномірний розподіл).
+
+robot:
+  class: "3kg robot sumo"
+  mass: 3.0
+  mass_rand: [2.85, 3.0]
+  footprint: [0.200, 0.200]        # довжина x ширина
+  height: 0.130
+  # Система координат робота: x — вперед, y — вліво, початок — геометричний центр корпусу.
+  com_x_from_axle: 0.02            # ЦМ на ~2 см попереду осі коліс
+  com_x_from_axle_rand: [0.01, 0.035]
+  yaw_inertia: null                # TODO: оцінити з Fusion (Inspect → Properties); поки ~ m*(a²+b²)/12
+
+  front:
+    type: wedge                    # клин/лопата, ковзає по рингу
+    contact_x: 0.100               # точка опори лопати від центру
+    friction_mu: 0.3               # тертя лопати по рингу
+    friction_mu_rand: [0.15, 0.5]
+    # Піддівання: яку частку навантаження на колеса суперника лопата може зняти, коли зайшла під нього.
+    lift_fraction: 0.6
+    lift_fraction_rand: [0.3, 0.8]
+    # Зазор кромки лопати над рингом. Лоб у лоб при рівному куті виграє нижча лопата.
+    clearance: 0.001
+    clearance_rand: [0.0, 0.002]
+
+  drive:
+    layout: "diff drive, 2 rear wheels"
+    wheel_diameter: 0.070
+    wheel_width: 0.050
+    track_width: 0.150             # центр-центр: зазор 10 см + 2×(5 см / 2)
+    axle_x: -0.060                 # TODO: уточнити по моделі (колеса позаду)
+    tire_mu: 0.9
+    tire_mu_rand: [0.6, 1.1]
+
+  motors:
+    model: "JGY-370 worm gear, 1:40, 160 rpm @12V"
+    datasheet_12v: {no_load_rpm: 160, stall_torque_kgcm: 6.4, stall_current_a: 2.0}
+    # Оцінка на 16 В (лінійне масштабування ×1.33). ЗАМІРЯТИ на реальному залізі.
+    est_16v: {no_load_rpm: 213, stall_torque_nm: 0.84, stall_current_a: 2.7}
+    strength_rand: [0.7, 1.15]     # множник на момент (розкид між моторами, нагрів)
+    left_right_mismatch_rand: [0.9, 1.1]
+    self_locking: true             # черв'як: зовнішня сила не провертає колесо
+    deadband_pwm_rand: [0.05, 0.15]
+    time_constant_s_rand: [0.02, 0.06]
+    encoders: false                # TODO: рекомендовано поставити (версії JGY-370 з енкодером існують)
+    # Інерція ротора + редуктора, приведена до колеса (J_rotor·40² + колесо). Оцінка, TODO: заміряти розгін.
+    reflected_inertia_kgm2: 1.5e-3
+
+  power:
+    battery: "4S LiPo"
+    voltage_rand: [14.0, 16.8]
+    nominal_v_for_motor_model: 16.0
+    full_v: 16.8                   # battery ADC у спостереженнях = V / full_v
+
+  sensors:
+    opponent_ir:
+      model: "E18-D80NK (digital, NPN, active-low, 5 V)"
+      count: 3
+      # [x, y, кут у градусах] від центру корпусу; кут + — вліво
+      mounts:
+        - [0.100,  0.060,  15.0]
+        - [0.100,  0.000,   0.0]
+        - [0.100, -0.060, -15.0]
+      range: 1.0                   # бажана дальність у симі
+      range_rand: [0.6, 1.0]       # реальний E18 зазвичай до ~0.8 м
+      beam_half_angle_deg: 3.0     # промінь з невеликим конусом
+      latency_s_rand: [0.002, 0.010]
+      false_negative_p: 0.03
+      false_positive_p: 0.005
+      crosstalk: true              # однакові E18 на суперникові можуть засвітити наші
+      # Кросток: наш датчик спрацьовує, якщо випромінювач суперника в нашому полі зору і світить на нас.
+      crosstalk_cone_deg: 20.0     # кут прийому нашого датчика і кут випромінювання чужого
+      crosstalk_range: 1.5         # м: далі засвітка вже не пробиває поріг
+      crosstalk_p: 0.3             # ймовірність хибного спрацювання за цикл, коли умови виконані
+    edge:
+      count: 4
+      mounts:                      # кути квадрата 170×170 мм по центру корпусу
+        - [ 0.085,  0.085]
+        - [ 0.085, -0.085]
+        - [-0.085,  0.085]
+        - [-0.085, -0.085]
+      latency_s_rand: [0.001, 0.005]
+    battery_adc: true
+
+controller:
+  mcu: "TBD: ESP32 (мінімум) або STM32 F4/H7 (бажано), обидва з FPU"
+  control_rate_hz: 100
+  control_rate_rand_hz: [80, 120]  # джитер циклу
+  physics_dt_s: 0.002
+  policy:
+    obs_frame_stack: 3
+    hidden: [64, 64]               # стартова точка; підбирається за якістю
+    activation: relu
+    precision: float32             # int8 лише якщо заміри на МК покажуть потребу
+  action: "[u_left, u_right] in [-1, 1] → PWM"
+  slew_limit_per_step: 0.25        # обмеження зміни PWM за цикл (є і в симі, і в прошивці)
+
+arena:
+  ring_diameter: 1.60              # зовнішній діаметр дохьо, разом з окантовкою
+  ring_diameter_rand: [1.55, 1.65]
+  edge_line_width: 0.05            # окантовка по краю, всередині ring_diameter
+  surface_color: white             # нестандартно: центр білий, окантовка чорна
+  edge_line_color: black           # line-сенсор у симі: 1 = над окантовкою (чорним)
+  start_modes: [face_to_face, side_by_side, back_to_back, random]
+  start_center_dist: 0.25          # м від центру рингу до центру робота у фіксованих стартах
+  start_center_dist_rand: [0.2, 0.3]
+  start_jitter_pos: 0.02           # м, шум позиції на старті
+  start_jitter_deg: 10.0           # шум курсу на старті
+  random_start_max_r: 0.5          # режим random: центри роботів у колі цього радіуса
+
+opponent:
+  hardware: "ідентичний робот (той самий корпус, мотори, МК, сенсори)"
+  brain: "хардкод FSM"             # чисто скриптований, без навчання: класична поведінка для 3 E18 + 4 лінії
+  fsm: "SEARCH (крутиться/їде) → бачить ІЧ → ATTACK (прямо/доворот на бокові) → бачить край → ESCAPE (назад + розворот)"
+  variants: [aggressive, cautious_edge_waiter, spinner, random_walker]
+  params_rand: true                # швидкості, кути, таймінги FSM рандомізуються
+  fsm:                             # діапазони параметрів FSM (рандомізуються на кожен матч), PWM у [0, 1]
+    attack_speed_rand: [0.75, 1.0]
+    steer_inner_rand: [0.0, 0.5]   # швидкість внутрішнього колеса відносно зовнішнього, коли бачить боковим ІЧ
+    search_spin_rand: [0.3, 0.6]
+    memory_s_rand: [0.1, 0.4]      # скільки ще доварчує в бік, де бачив суперника
+    escape_speed_rand: [0.6, 1.0]
+    escape_back_s_rand: [0.15, 0.35]
+    escape_turn_s_rand: [0.15, 0.4]
+    burst_period_s_rand: [0.6, 1.5] # aggressive: як часто пошук переривається ривком уперед
+    burst_s_rand: [0.15, 0.4]
+    wander_period_s_rand: [0.3, 1.0] # random_walker: як часто міняє випадкову команду
+    cautious_scale_rand: [0.4, 0.7] # cautious: множник на швидкості атаки і пошуку
+    attack_arc_rand: [0.1, 0.35]   # бачить лише центром → внутрішнє колесо на (1−arc): заходить під кутом
+    attack_timeout_s_rand: [1.0, 2.5] # клінч довше цього → відкат і новий заїзд під кутом (не для cautious)
+    reposition_back_s_rand: [0.1, 0.25]
+    reposition_turn_s_rand: [0.06, 0.15]
+
+sim:
+  # Параметри чисельної моделі, яких немає на залізі.
+  gravity: 9.81
+  slip_smoothing_vel: 0.03         # s₀ у μ·N·tanh(|slip|/s₀): м/с, ширина згладження Кулона (шини, лопата, корпуси)
+  contact:                         # робот-робот: penalty spring-damper на точках SAT-контакту
+    stiffness: 20000.0              # Н/м на точку; стабільно при dt = 2 мс
+    damping: 170.0                 # Н·с/м на точку (~0.5 від критичного для 2×3 кг)
+    body_mu: 0.3                   # тертя корпус-корпус
+    body_mu_rand: [0.2, 0.5]
+  wedge:                           # хто кого піддів (див. sumo/physics.py, _update_lift)
+    front_cone_deg: 45.0           # контакт рахується лопатою, якщо нормаль у межах ±45° від курсу
+    angle_advantage_deg: 10.0      # лопата в лопату: перекіс, що дає повну перевагу тому, хто зайшов під кутом
+    clearance_advantage: 0.001     # лопата в лопату: різниця кліренсу (м), що дає повну перевагу нижчому
+    lift_time_s: 0.15              # за скільки лопата заходить під суперника, поки є контакт
+    drop_time_s: 0.05              # за скільки суперник «падає» з лопати без контакту
+
+match:
+  timeout_s: 20
+  start_delay_s: 0                 # у реальних правилах 5 с — відтворює прошивка

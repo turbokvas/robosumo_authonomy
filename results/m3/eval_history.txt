@@ -1,0 +1,10 @@
+[50,069,504] eval stationary 88%  aggressive 79%  cautious_e 93%  spinner 81%  random_wal 85%  → ckpt_00050M.pt
+[100,139,008] eval stationary 84%  aggressive 84%  cautious_e 92%  spinner 82%  random_wal 88%  → ckpt_00100M.pt
+[150,208,512] eval stationary 89%  aggressive 91%  cautious_e 94%  spinner 90%  random_wal 91%  → ckpt_00150M.pt
+[200,015,872] eval stationary 92%  aggressive 87%  cautious_e 95%  spinner 83%  random_wal 91%  → ckpt_00200M.pt
+[250,085,376] eval stationary 85%  aggressive 88%  cautious_e 97%  spinner 86%  random_wal 89%  → ckpt_00250M.pt
+[300,154,880] eval stationary 86%  aggressive 91%  cautious_e 96%  spinner 90%  random_wal 91%  → ckpt_00300M.pt
+[350,224,384] eval stationary 83%  aggressive 89%  cautious_e 97%  spinner 88%  random_wal 89%  → ckpt_00350M.pt
+[400,031,744] eval stationary 81%  aggressive 89%  cautious_e 95%  spinner 89%  random_wal 86%  → ckpt_00400M.pt
+[450,101,248] eval stationary 69%  aggressive 89%  cautious_e 87%  spinner 90%  random_wal 88%  → ckpt_00450M.pt
+[500,170,752] eval stationary 84%  aggressive 89%  cautious_e 96%  spinner 89%  random_wal 89%  → ckpt_00500M.pt

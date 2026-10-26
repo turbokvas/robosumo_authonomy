@@ -2,7 +2,7 @@
 
 run_name: m4_league
 seed: 1
-init_ckpt: runs/M3_FINAL/ckpt_latest.pt   # set to the M3 run used as the starting point
+init_ckpt: results/m3/ckpt_00500M.pt   # final M3 policy (500M steps, shaping fully annealed)
 
 env:
   num_envs: 4096

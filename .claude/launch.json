@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "tensorboard",
+      "runtimeExecutable": "M:\\robosumo_authonomy\\.venv\\Scripts\\tensorboard.exe",
+      "runtimeArgs": ["--logdir", "M:\\robosumo_authonomy\\runs", "--port", "6006", "--reload_interval", "15"],
+      "port": 6006
+    }
+  ]
+}
