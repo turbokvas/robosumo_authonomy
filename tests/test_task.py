@@ -63,3 +63,10 @@ def test_terminal_reward_and_autoreset(spec):
     assert reward[0] > CFG["reward"]["win"] - 1 and reward[1] < CFG["reward"]["loss"] + 1
     assert (task.env.t == 0).all() and (task.opp_type == 0).all()  # new episodes against the stationary target
     assert not physics.com_out_of_ring(task.env.state, task.env.p).any()
+
+
+def test_bare_hardware_share(spec):
+    cfg = {**CFG, "env": {**CFG["env"], "sensor_dropout": {"bare": 0.5, "side_ir": 0.5, "encoders": 0.5, "imu": 0.5}}}
+    task = SumoTask(spec, cfg, 4096, DEVICE, seed=0)
+    none = (task.present.sum(-1) == 0).float().mean().item()
+    assert 0.5 + 0.5 * 0.125 - 0.03 < none < 0.5 + 0.5 * 0.125 + 0.03

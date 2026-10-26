@@ -207,8 +207,9 @@ class SumoTask:
     Critic obs = privileged state of both robots, their physical parameters, opponent type, FSM mode/params.
     Reward = terminal win/loss/draw + shaping (approach, push the opponent off centre while close, action jerk);
     approach/push are multiplied by `shaping_scale`, which the trainer anneals to 0.
-    Reserved sensor groups are present/absent per robot per match: `sensors` = "train" (random, cfg
-    env.sensor_dropout = probability a group is absent), "installed" (spec `installed` flags), "all" or "none".
+    Reserved sensor groups are present/absent per robot per match: `sensors` = "train" (random: cfg
+    env.sensor_dropout gives, per group, the probability it is absent, and `bare` the probability that all of them
+    are absent at once, i.e. today's hardware), "installed" (spec `installed` flags), "all" or "none".
     Finished envs auto-reset; the obs returned for them belong to the new episode.
     """
 
@@ -237,6 +238,7 @@ class SumoTask:
         if sensors == "train":
             drop = cfg["env"].get("sensor_dropout", {})
             self.absent_p = torch.tensor([drop.get(g, 1.0) for g in groups], device=device)
+            self.bare_p = drop.get("bare", 0.0)
         elif sensors == "installed":
             sens = get(spec, "robot.sensors")
             self.absent_p = torch.tensor([0.0 if sens[g]["installed"] else 1.0 for g in groups], device=device)
@@ -244,6 +246,8 @@ class SumoTask:
             self.absent_p = torch.full((len(groups),), 0.0 if sensors == "all" else 1.0, device=device)
         else:
             raise ValueError(f"sensors={sensors!r}")
+        if sensors != "train":
+            self.bare_p = 0.0
         self.present = torch.zeros(num_envs, physics.N_ROBOTS, len(groups), device=device)
         self.rew = cfg["reward"]
         self.shaping_scale = 1.0
@@ -272,7 +276,8 @@ class SumoTask:
         self.opp_type.index_copy_(0, idx, opp)
         self.fsm.variant.index_copy_(0, idx, (opp - 1).clamp(0, self.n_fsm - 1))
         u = torch.rand(k, physics.N_ROBOTS, len(self.absent_p), device=self.device, generator=self.env.gen)
-        self.present.index_copy_(0, idx, (u >= self.absent_p).float())
+        bare = torch.rand(k, physics.N_ROBOTS, 1, device=self.device, generator=self.env.gen) < self.bare_p
+        self.present.index_copy_(0, idx, ((u >= self.absent_p) & ~bare).float())
         fresh = self.env.readings()
         for key in self.readings:
             mm = m.view(-1, *([1] * (fresh[key].dim() - 1)))
