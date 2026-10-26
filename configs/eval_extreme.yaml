@@ -1,0 +1,30 @@
+# M5 eval sets: nominal hardware vs the edges of what is being considered. Each scenario is a list of spec
+# overrides (train.eval --set syntax); randomization is off, both robots get the same hardware.
+#   uv run python -m train.eval --ckpt CKPT --extreme configs/eval_extreme.yaml [--sim 3d]
+# Done criterion (INTERFACE_AND_M5.md): win rate drop on each extreme scenario ≤ 15% of the nominal one.
+matches: 1024                      # per opponent per scenario
+opponents: [stationary, aggressive, cautious_edge_waiter, spinner, random_walker]
+scenarios:
+  nominal: []
+  weak_motors:
+    - robot.motors.est_16v.stall_torque_nm=0.59
+    - robot.motors.est_16v.no_load_rpm=150
+    - robot.power.voltage_rand=[14.0, 14.0]
+  low_grip:
+    - robot.drive.tire_mu=0.5
+  short_ir:
+    - robot.sensors.opponent_ir.range=0.6
+  big_latency:
+    - robot.sensors.opponent_ir.latency_s_rand=[0.02, 0.02]
+    - robot.sensors.edge.latency_s_rand=[0.01, 0.01]
+    - controller.control_rate_hz=80
+  light_far_com:
+    - robot.mass=2.85
+    - robot.com_x_from_axle=0.035
+  worst_case:
+    - robot.motors.est_16v.stall_torque_nm=0.59
+    - robot.motors.est_16v.no_load_rpm=150
+    - robot.power.voltage_rand=[14.0, 14.0]
+    - robot.drive.tire_mu=0.5
+    - robot.sensors.opponent_ir.range=0.6
+    - robot.sensors.opponent_ir.latency_s_rand=[0.02, 0.02]

@@ -5,7 +5,7 @@
 robot:
   class: "3kg robot sumo"
   mass: 3.0
-  mass_rand: [2.7, 3.0]            # M5: варіанти збірки (номінал рівно 3 кг)
+  mass_rand: [2.85, 3.0]           # номінал рівно 3 кг; лише допуск збірки
   # Розміри — з CAD (sim3d/assets/robot_mdl.step → sim3d/assets/generated/geometry.yaml, 2026-10-26)
   footprint: [0.1905, 0.199]       # довжина x ширина корпусу
   height: 0.0989
@@ -28,8 +28,7 @@ robot:
 
   drive:
     layout: "diff drive, 2 rear wheels"
-    wheel_diameter: 0.070
-    wheel_diameter_rand: [0.060, 0.080]  # M5: розглядаються інші колеса
+    wheel_diameter: 0.070          # фіксовано (не рандомізується): 80 мм — тест дотренування поза діапазоном
     wheel_width: 0.050
     track_width: 0.149             # центр-центр (CAD)
     axle_x: -0.0637                # вісь коліс від центру (CAD)

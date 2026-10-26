@@ -18,7 +18,7 @@ def test_spec_loads(spec):
 
 def test_rand_names(spec):
     names = rand_ranges(spec)
-    assert names["robot.mass"] == (2.7, 3.0)
+    assert names["robot.mass"] == (2.85, 3.0)
     assert names["controller.control_rate_hz"] == (80.0, 120.0)
     assert names["arena.ring_diameter"] == (1.55, 1.65)
     assert "robot.sensors.opponent_ir.latency_s" in names
