@@ -4,7 +4,7 @@
 
 run_name: m5_robust_3d
 seed: 1
-init_ckpt: results/m5_pre_blade_fix/ckpt_00400M.pt   # M5 400M on the old blade (blunt end face), already used to randomization
+init_ckpt: results/m5_blade_fix/ckpt_00400M.pt   # M5 after the blade fix: 400M, plateau at ~50% wins / ~45% draws
 
 env:
   sim: 3d                          # MuJoCo Warp (sim3d/env3d.py)
@@ -16,15 +16,16 @@ env:
     encoders: 0.5
     imu: 0.5
 
-reward:                            # shaping stays off: M3 already annealed it to 0
+reward:                            # M5: push shaping back on (fades over 600M); approach stays off (it favours head-on)
   win: 10.0
   loss: -10.0
   draw: -4.0                       # 3D plateaued at ~30% clinch draws; owner's rule: −4 if no progress
   approach: 0.0
-  push: 0.0
+  push: 3.0                        # per metre the opponent moves off centre while close: credit for partial
+                                   # pushes and side hits (head-on into a still robot only beaches the attacker)
   push_gate_dist: 0.3
   jerk: 0.02
-  shaping_anneal_steps: 1
+  shaping_anneal_steps: 600_000_000  # push fades linearly to 0
 
 ppo:
   total_steps: 2_000_000_000
