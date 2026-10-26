@@ -226,7 +226,12 @@ class SumoTask:
         """pool: object with `capacity`, `size` and `act(obs [N,D], slot [N]) -> [N,2]` (train.league.PolicyPool)."""
         iface.check_spec(spec)
         self.spec, self.n, self.device = spec, num_envs, device
-        self.env = SumoEnv(spec, num_envs, device, randomize=cfg["env"]["randomize"], seed=seed)
+        if cfg["env"].get("sim", "2d") == "3d":
+            from sim3d.env3d import SumoEnv3D  # MuJoCo Warp; imported only when used
+
+            self.env = SumoEnv3D(spec, num_envs, device, randomize=cfg["env"]["randomize"], seed=seed)
+        else:
+            self.env = SumoEnv(spec, num_envs, device, randomize=cfg["env"]["randomize"], seed=seed)
         self.fsm = FSM(spec, num_envs, device, None, self.env.gen)
         self.pool = pool
         self.n_fsm = len(self.fsm.variants)

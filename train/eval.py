@@ -222,6 +222,7 @@ def main() -> None:
     ap.add_argument("--regression", default=None, help="regression suite yaml (fixed opponents and seeds)")
     ap.add_argument("--baseline", default=None, help="with --regression: checkpoint the candidate must not fall behind")
     ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="spec override (repeatable)")
+    ap.add_argument("--sim", default=None, choices=["2d", "3d"], help="override the simulator (default: as trained)")
     ap.add_argument("--sensors", default="installed", choices=["installed", "all", "none"],
                     help="reserved sensor groups present in eval matches")
     ap.add_argument("--matches", type=int, default=2048)
@@ -256,6 +257,8 @@ def main() -> None:
     if not args.ckpt:
         ap.error("--ckpt or --matrix is required")
     actor, spec, cfg = load_actor(args.ckpt, args.device, spec)
+    if args.sim:
+        cfg = {**cfg, "env": {**cfg["env"], "sim": args.sim}}
     names = ["stationary", *get(spec, "opponent.variants")]
     for opp in names:
         r = evaluate(actor, spec, cfg, opp, args.matches, args.device, sensors=args.sensors)
