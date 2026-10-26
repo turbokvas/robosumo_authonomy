@@ -348,8 +348,10 @@ def _update_lift(
     + (opponent's clearance − own) / clearance_adv, i.e. whoever came in at an angle, then the lower blade.
     The advantage is latched: whoever got under at impact stays under while the front contact lasts, even after
     the bodies swing flush (that happens within tens of ms), and the loser cannot get under the winner.
-    The winner works the blade under towards lift_max while pushing; the advantage sets how fast
-    (full advantage → lift_time, a tenth of it → 10× slower). Lift drops quickly once contact is lost.
+    How far the blade gets under is proportional to the advantage: lift → lift_max · share while pushing (over
+    lift_time), so a slightly better angle gives a slight lift, not the whole contest. An all-or-nothing rule made
+    tiny, unobservable differences decide matches and drove policy styles into rock-paper-scissors cycles.
+    Lift drops quickly once contact is lost.
     """
     if isinstance(dt2, torch.Tensor):
         down = 1 - torch.exp(-dt2 / p.drop_time)
@@ -368,9 +370,12 @@ def _update_lift(
     decayed = state.wedge * (1 - down)
     decayed = torch.where(decayed < WEDGE_EPS, torch.zeros_like(decayed), decayed)  # exp decay never hits 0
     state.wedge.copy_(torch.where(pushing, latched, decayed))
-    by_me = torch.where(pushing & (state.wedge > 0), p.lift_max, torch.zeros_like(share))
+    by_me = torch.where(pushing, p.lift_max * state.wedge, torch.zeros_like(share))
     target = by_me.flip(1)  # lift of each robot = what the other one's wedge achieves
-    up = 1 - torch.exp(-dt2 * state.wedge.flip(1) / p.lift_time)
+    if isinstance(dt2, torch.Tensor):
+        up = 1 - torch.exp(-dt2 / p.lift_time)
+    else:
+        up = 1 - math.exp(-dt2 / p.lift_time)
     alpha = torch.where(target > state.lift, up, down)
     state.lift.add_(alpha * (target - state.lift))
 

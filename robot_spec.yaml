@@ -111,7 +111,7 @@ controller:
   control_rate_rand_hz: [80, 120]  # джитер циклу
   physics_dt_s: 0.002
   policy:
-    obs_frame_stack: 3
+    obs_frame_lags: [32, 16, 8, 4, 2, 1, 0]   # кадри N циклів тому (0–320 мс) + пам'ять прошивки, див. sumo/interface.py
     hidden: [64, 64]               # частина interface v1; міняти лише після заміру часу на МК і з підтвердження
     activation: relu
     precision: float32             # int8 лише якщо заміри на МК покажуть потребу

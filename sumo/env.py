@@ -233,7 +233,9 @@ class SumoTask:
         self.opp_names = [STATIONARY] + self.fsm.variants + [f"pool{i}" for i in range(pool.capacity if pool else 0)]
         self.opp_weights = torch.ones(len(self.opp_names), device=device)
         self.opp_type = torch.zeros(num_envs, dtype=torch.long, device=device)
-        self.frames = torch.zeros(num_envs, physics.N_ROBOTS, iface.OBS_STACK, iface.FRAME_DIM, device=device)
+        self.frames = torch.zeros(num_envs, physics.N_ROBOTS, iface.HISTORY_LEN, iface.FRAME_DIM, device=device)
+        self.lag_idx = torch.tensor([iface.HISTORY_LEN - 1 - lag for lag in iface.FRAME_LAGS], device=device)
+        self.memory = firmware.SensorMemory(num_envs, physics.N_ROBOTS, device)
         groups = list(iface.SENSOR_GROUPS)
         if sensors == "train":
             drop = cfg["env"].get("sensor_dropout", {})
@@ -283,9 +285,10 @@ class SumoTask:
             mm = m.view(-1, *([1] * (fresh[key].dim() - 1)))
             self.readings[key] = torch.where(mm, fresh[key], self.readings[key])
         self.frames = torch.where(m.view(-1, 1, 1, 1), torch.zeros_like(self.frames), self.frames)
+        self.memory.reset(idx)
+        self._push_frame(m)  # first frame of the new episodes only: other envs already got this tick's frame
         self.prev_raw = torch.where(m.view(-1, 1), torch.zeros_like(self.prev_raw), self.prev_raw)
         self.ep_len = torch.where(m, torch.zeros_like(self.ep_len), self.ep_len)
-        self._push_frame()
         self.prev_dist, self.prev_opp_r = self._geometry()
 
     # --- observations ----------------------------------------------------------------------------------------------
@@ -308,12 +311,28 @@ class SumoTask:
         }
         return torch.cat([parts[name] for name, _ in iface.FRAME], -1)
 
-    def _push_frame(self) -> None:
-        self.frames = torch.cat([self.frames[:, :, 1:], self._frame().unsqueeze(2)], 2)
+    def _push_frame(self, m: torch.Tensor | None = None) -> None:
+        """New control tick: frame history and the firmware memory (only what the MCU has); only envs in m if given.
+
+        Regression: resets used to push a second frame into every env, so with thousands of envs (some reset
+        nearly every tick) the history was full of duplicated frames."""
+        r = self.readings
+        mem = self.memory
+        old = None if m is None else (mem.ir_age.clone(), mem.line_age.clone(), mem.last_side.clone(), mem.engaged.clone())
+        mem.update(r["ir"], r["ir_side"] * self.present[..., 0:1], r["line"], self.env.ctrl_dt)
+        frames = torch.cat([self.frames[:, :, 1:], self._frame().unsqueeze(2)], 2)
+        if m is None:
+            self.frames = frames
+            return
+        self.frames = torch.where(m.view(-1, 1, 1, 1), frames, self.frames)
+        for name, prev in zip(("ir_age", "line_age", "last_side", "engaged"), old):
+            cur = getattr(mem, name)
+            setattr(mem, name, torch.where(m.view(-1, *([1] * (cur.dim() - 1))), cur, prev))
 
     def obs(self, slot: int = 0) -> torch.Tensor:
-        """Actor obs of robot `slot` (its own sensors only), [N, OBS_DIM]."""
-        return self.frames[:, slot].flatten(1)
+        """Actor obs of robot `slot` (its own sensors only), [N, OBS_DIM]: lagged frames, then memory."""
+        frames = self.frames[:, slot].index_select(1, self.lag_idx).flatten(1)
+        return torch.cat([frames, self.memory.features()[:, slot]], -1)
 
     def opp_category(self) -> torch.Tensor:
         """0 = stationary, 1..n_fsm = FSM variant, n_fsm+1 = any pool policy."""

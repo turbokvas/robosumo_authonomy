@@ -1,8 +1,8 @@
 # M4: self-play league. Starts from the M3 policy; opponents = stationary + FSMs + frozen policy snapshots (PFSP).
 
-run_name: m4_league
+run_name: m4_league_v3
 seed: 1
-init_ckpt: results/m3/ckpt_00500M_v1.pt   # final M3 policy, migrated to interface v1
+init_ckpt: results/m3/ckpt_00500M_v2.pt   # M3 on interface v2 (memory inputs start at zero weight)
 
 env:
   num_envs: 4096
@@ -24,11 +24,11 @@ reward:                            # shaping stays off: M3 already annealed it t
   shaping_anneal_steps: 1
 
 ppo:
-  total_steps: 3_500_000_000
+  total_steps: 2_000_000_000
   rollout: 64
   gamma: 0.995
   gae_lambda: 0.95
-  lr: 2.0e-4
+  lr: 1.5e-4
   epochs: 4
   minibatches: 8
   clip: 0.2
@@ -37,13 +37,19 @@ ppo:
   max_grad_norm: 1.0
   init_log_std: -1.5               # pretrained actor: start with little exploration noise
   critic_hidden: [256, 256]
-  critic_warmup_updates: 30        # fresh critic (new obs layout) learns before the actor moves
+  critic_warmup_updates: 30        # fresh critic (v2 critic input), learns before the actor moves
 
 league:
-  pool_size: 24                    # frozen snapshots kept (the first `anchors` are never overwritten)
-  anchors: 1                       # pool0 = the initial (M3) policy: regression anchor
+  pool_size: 32                    # frozen snapshots kept (the anchors are never overwritten)
+  anchors: 1                       # recomputed: initial policy + anchor_checkpoints
+  anchor_checkpoints:              # different styles from run 1's cycle (each beats some of the others)
+    - results/m4_run1/ckpt_00400M_v2.pt
+    - results/m4_run1/ckpt_01000M_v2.pt
+    - results/m4_run1/ckpt_02000M_v2.pt
+    - results/m4_run1/ckpt_02700M_v2.pt
+  anchor_share: 0.35               # share of episodes against the anchors
   snapshot_steps: 50_000_000
-  fixed_share: 0.3                 # share of episodes against stationary + FSMs, so old skills stay
+  fixed_share: 0.25                # share of episodes against stationary + FSMs, so old skills stay
   pfsp_power: 2.0                  # weight ∝ (1 − win_rate)^p: focus on opponents we lose to
   pfsp_floor: 0.02                 # keep a little weight on opponents already beaten
   win_ema: 0.01                    # per-episode EMA rate for the win-rate estimates

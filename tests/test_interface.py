@@ -20,7 +20,7 @@ def spec():
 
 def test_spec_matches_interface(spec):
     iface.check_spec(spec)
-    assert iface.OBS_DIM == iface.FRAME_DIM * iface.OBS_STACK
+    assert iface.OBS_DIM == iface.FRAME_DIM * len(iface.FRAME_LAGS) + iface.MEMORY_DIM
     assert sum(w for _, w in iface.FRAME) == iface.FRAME_DIM
 
 

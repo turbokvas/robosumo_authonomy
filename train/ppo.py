@@ -128,6 +128,9 @@ def main() -> None:
         init_ckpt = torch.load(ROOT / init, map_location=dev, weights_only=False)
         iface.check_checkpoint(init_ckpt, init)
         actor.load_state_dict(init_ckpt["actor"])
+        if "critic" in init_ckpt and init_ckpt.get("cobs_dim") == cobs_dim:
+            critic.load_state_dict(init_ckpt["critic"])
+            print("critic initialised from the same checkpoint")
         with torch.no_grad():
             actor.log_std.fill_(pc["init_log_std"])
         print(f"actor initialised from {init}")
@@ -145,6 +148,14 @@ def main() -> None:
         print(f"resumed {args.resume} at step {step:,}, stage {stages[stage]['name']}")
     elif league:
         print("pool:", league.add_snapshot(actor, "init"), "= anchor (initial policy)")
+        for path in lc.get("anchor_checkpoints", []):
+            anchor_ckpt = torch.load(ROOT / path, map_location=dev, weights_only=False)
+            iface.check_checkpoint(anchor_ckpt, path)
+            a = Actor(obs_dim, hidden).to(dev)
+            a.load_state_dict(anchor_ckpt["actor"])
+            print("pool:", league.add_snapshot(a, path), "= anchor", path)
+    if league:
+        league.cfg["anchors"] = 1 + len(lc.get("anchor_checkpoints", []))
     if league:
         task.opp_weights = league.weights()
     task._new_episodes(torch.ones(n, dtype=torch.bool, device=dev))
@@ -304,11 +315,15 @@ def main() -> None:
             next_eval += ec["every_steps"]
             actor.eval()
             res = {}
-            for name in task.opp_names[: task.n_fsm + 1] + (["pool0"] if league else []):
+            anchors = [f"pool{i}" for i in range(league.cfg["anchors"])] if league else []
+            for name in task.opp_names[: task.n_fsm + 1] + anchors:
                 r = evaluate(actor, spec, cfg, name, ec["matches"], dev, pool=pool)
                 res[name] = r["win"]
                 writer.add_scalar(f"eval_win/{name}", r["win"], step)
                 writer.add_scalar(f"eval_draw/{name}", r["draw"], step)
+            if anchors:
+                res["anchor_mean"] = sum(res[a] for a in anchors) / len(anchors)
+                writer.add_scalar("eval_win/anchor_mean", res["anchor_mean"], step)
             path = save(f"{step // 1_000_000:05d}M")
             print(f"[{step:,}] eval " + "  ".join(f"{k[:10]} {v:.0%}" for k, v in res.items()) + f"  → {path.name}", flush=True)
             try:

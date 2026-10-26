@@ -1,4 +1,4 @@
-"""Frozen policy interface, version 1: what the actor sees, what it outputs, what the critic sees.
+"""Frozen policy interface, version 2: what the actor sees, what it outputs, what the critic sees.
 
 Checkpoints are only interchangeable (fine-tuning, league, export) while this file is unchanged. Rules:
 - Do not change the composition, order, scaling or stack depth of the actor obs, or the action semantics, without
@@ -6,10 +6,15 @@ Checkpoints are only interchangeable (fine-tuning, league, export) while this fi
 - Physics changes go through robot_spec.yaml only; they never touch this file.
 - The actor gets only what the robot's MCU has. Privileged state goes to the critic only.
 
-Actor observation = OBS_STACK frames (oldest first, newest last), each frame = FRAME fields in this order.
-Values are raw sensor readings divided by the fixed scales below (not by spec values, so the meaning of an input
-does not shift when the hardware in the spec changes). The actor's RunningNorm then standardizes them; its
-statistics are part of the checkpoint.
+Actor observation = [frames at FRAME_LAGS control ticks ago (oldest first), each = FRAME fields in this order]
++ [MEMORY features]. Values are raw sensor readings divided by the fixed scales below (not by spec values, so the
+meaning of an input does not shift when the hardware in the spec changes). The actor's RunningNorm then
+standardizes them; its statistics are part of the checkpoint.
+
+v2 (2026-10-26) adds memory. v1 saw 3 frames = 30 ms: a purely reactive policy, which in self-play cycled through
+styles (each beats one, loses to another) instead of improving. v2 sees frames up to 320 ms back and the firmware's
+memory counters (sumo/firmware.py: how long ago each E18 / line sensor fired, the side the opponent was last seen
+on, how long the current push has lasted), the same kind of memory the FSM opponents have.
 
 Reserved sensors (side IR, wheel encoders, IMU) are not on the robot yet. The sim always models them; each
 group is present or absent for a whole match (absent → zeros and its has_* flag = 0). Training drops groups at
@@ -28,9 +33,10 @@ from typing import Any
 
 import yaml
 
-INTERFACE_VERSION = 1
+INTERFACE_VERSION = 2
 
-OBS_STACK = 3
+FRAME_LAGS = (32, 16, 8, 4, 2, 1, 0)  # control ticks back, oldest first (~0–320 ms at 100 Hz)
+HISTORY_LEN = max(FRAME_LAGS) + 1
 HIDDEN = (64, 64)  # actor MLP; changing it needs an MCU timing measurement and a new interface version
 ACT_DIM = 2
 
@@ -66,26 +72,56 @@ for _name, _w in FRAME:
     FRAME_SLICES[_name] = slice(_o, _o + _w)
     _o += _w
 FRAME_DIM = _o
-OBS_DIM = FRAME_DIM * OBS_STACK
+
+# firmware memory (sumo/firmware.py SensorMemory), appended after the frames
+MEMORY_HORIZON_S = 1.0     # ages saturate here: 1.0 = "not within the last second"
+ENGAGED_HORIZON_S = 2.0
+MEMORY: tuple[tuple[str, int], ...] = (
+    ("ir_front_age", 3),   # time since each front E18 last saw the opponent / MEMORY_HORIZON_S, clipped to 1
+    ("ir_side_age", 2),    # reserved: same for the side E18 (1 when absent)
+    ("last_seen_side", 1), # +1 left, −1 right, 0 centre: where the most recent sighting was
+    ("line_age", 4),       # time since each line sensor last saw the edge / MEMORY_HORIZON_S, clipped to 1
+    ("engaged", 1),        # how long the centre E18 has seen the opponent without a break / ENGAGED_HORIZON_S
+)
+MEMORY_SLICES: dict[str, slice] = {}
+_o = 0
+for _name, _w in MEMORY:
+    MEMORY_SLICES[_name] = slice(_o, _o + _w)
+    _o += _w
+MEMORY_DIM = _o
+OBS_DIM = FRAME_DIM * len(FRAME_LAGS) + MEMORY_DIM
+RESERVED_MEMORY = ("ir_side_age",)
+
+
+def frame_col(lag_index: int, field: str, i: int = 0) -> int:
+    """Column of frame field `field`[i] in the frame at FRAME_LAGS[lag_index]."""
+    return lag_index * FRAME_DIM + FRAME_SLICES[field].start + i
+
+
+def memory_col(field: str, i: int = 0) -> int:
+    return FRAME_DIM * len(FRAME_LAGS) + MEMORY_SLICES[field].start + i
 
 
 def reserved_obs_columns() -> list[int]:
-    """Indices of reserved inputs in the flattened actor obs (all stacked frames)."""
+    """Indices of reserved inputs in the actor obs (all frames + memory)."""
     cols = []
-    for k in range(OBS_STACK):
+    for k in range(len(FRAME_LAGS)):
         for name in RESERVED_FIELDS:
             s = FRAME_SLICES[name]
-            cols += [k * FRAME_DIM + i for i in range(s.start, s.stop)]
+            cols += [frame_col(k, name, i) for i in range(s.stop - s.start)]
+    for name in RESERVED_MEMORY:
+        s = MEMORY_SLICES[name]
+        cols += [memory_col(name, i) for i in range(s.stop - s.start)]
     return cols
 
 
 def check_spec(spec: dict[str, Any]) -> None:
     """The spec must agree with the frozen interface on everything the interface fixes."""
     pol = spec["controller"]["policy"]
-    if pol["obs_frame_stack"] != OBS_STACK or tuple(pol["hidden"]) != HIDDEN:
+    if tuple(pol["obs_frame_lags"]) != FRAME_LAGS or tuple(pol["hidden"]) != HIDDEN:
         raise ValueError(
-            f"robot_spec.yaml policy shape (stack {pol['obs_frame_stack']}, hidden {pol['hidden']}) differs from "
-            f"interface v{INTERFACE_VERSION} (stack {OBS_STACK}, hidden {list(HIDDEN)}): bump the interface version"
+            f"robot_spec.yaml policy shape (lags {pol['obs_frame_lags']}, hidden {pol['hidden']}) differs from "
+            f"interface v{INTERFACE_VERSION} (lags {list(FRAME_LAGS)}, hidden {list(HIDDEN)}): bump the interface version"
         )
     if len(spec["robot"]["sensors"]["opponent_ir"]["mounts"]) != FRAME_SLICES["ir_front"].stop - FRAME_SLICES["ir_front"].start:
         raise ValueError("opponent_ir mount count differs from the interface")

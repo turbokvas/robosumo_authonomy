@@ -4,6 +4,11 @@ PolicyPool keeps every snapshot's weights stacked in [capacity, ...] tensors and
 batched pass (each env gathers its opponent's weights), so the cost does not grow with the pool size.
 League tracks the learner's win rate against every opponent (EMA over finished episodes) and samples
 opponents with prioritized fictitious self-play: weight ∝ (1 − win_rate)^p, i.e. mostly the ones we lose to.
+
+Episode shares: `fixed_share` for stationary + FSMs, `anchor_share` for the anchors (the first pool slots, never
+overwritten: the initial policy plus `anchor_checkpoints`, chosen to cover different styles), the rest for the
+rolling snapshots. Without guaranteed anchor games the first M4 run cycled rock-paper-scissors style: every
+version beat the recent snapshots and lost to styles that had dropped out of the pool (flat Elo).
 """
 
 from __future__ import annotations
@@ -102,13 +107,19 @@ class League:
         self.next_slot = s["next_slot"]
 
     def weights(self) -> torch.Tensor:
-        """PFSP over pool policies, a fixed share for the FSM/stationary set (so old skills are not forgotten)."""
+        """PFSP inside each group; group shares fixed: FSM/stationary, anchors, rolling snapshots."""
         hard = (1 - self.win).clamp(min=0).pow(self.cfg["pfsp_power"]) + self.cfg["pfsp_floor"]
         w = torch.zeros_like(self.win)
-        fixed = slice(0, self.n_fixed)
-        pool = slice(self.n_fixed, self.n_fixed + self.pool.size)
-        share = self.cfg["fixed_share"] if self.pool.size else 1.0
-        w[fixed] = share * hard[fixed] / hard[fixed].sum()
-        if self.pool.size:
-            w[pool] = (1 - share) * hard[pool] / hard[pool].sum()
-        return w
+        n_anchor = min(self.cfg["anchors"], self.pool.size)
+        groups = [
+            (slice(0, self.n_fixed), self.cfg["fixed_share"]),
+            (slice(self.n_fixed, self.n_fixed + n_anchor), self.cfg.get("anchor_share", 0.0)),
+            (slice(self.n_fixed + n_anchor, self.n_fixed + self.pool.size), None),
+        ]
+        sizes = [g.stop - g.start for g, _ in groups]
+        rest = 1.0 - sum(s for (g, s), n in zip(groups, sizes) if s is not None and n > 0)
+        for (g, share), n in zip(groups, sizes):
+            if n > 0:
+                share = rest if share is None else share
+                w[g] = share * hard[g] / hard[g].sum()
+        return w / w.sum()

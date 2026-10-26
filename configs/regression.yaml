@@ -2,7 +2,9 @@
 # anyone the baseline already beats.   uv run python -m train.eval --ckpt NEW --regression configs/regression.yaml --baseline OLD
 opponents: [stationary, aggressive, cautious_edge_waiter, spinner, random_walker]
 anchor_checkpoints:                # frozen policies every new version is also checked against
-  - results/m3/ckpt_00500M_v1.pt
+  - results/m3/ckpt_00500M_v2.pt
+  - results/m4_run1/ckpt_00400M_v2.pt
+  - results/m4_run1/ckpt_02700M_v2.pt
 seeds: [1001, 1002, 1003]
 matches: 512                       # per opponent per seed
 sensors: installed                 # reserved sensor groups as on the current robot

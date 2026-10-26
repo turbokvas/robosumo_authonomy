@@ -270,3 +270,16 @@ def test_throughput_4096_envs(spec):
     rate = n * control_steps / (time.perf_counter() - t)
     print(f"\nphysics: {rate:,.0f} env-steps/s ({substeps} substeps each)")
     assert rate >= 50_000
+
+
+def test_lift_proportional_to_advantage(spec):
+    """Half the full angle advantage → about half the lift (no all-or-nothing contest)."""
+    lifts = []
+    for tilt_deg in (12.0, 6.0):
+        p, s = make(spec)
+        place(s, p, (-0.25, 0.0), math.radians(tilt_deg), (0.25, 0.0), math.pi)
+        s.wedge[:] = 0
+        run(s, p, cmd(1, 1, 1, 0, 0), 1.0)
+        lifts.append(s.lift[0, 1].item())
+    assert lifts[0] > 0.5 * p.lift_max[0, 0]
+    assert 0.1 * lifts[0] < lifts[1] < 0.9 * lifts[0]
