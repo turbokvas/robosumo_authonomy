@@ -153,6 +153,7 @@ def main() -> None:
         "body_volume_m3": float(abs(body.volume)),
         "wedge_tip_x": float(tip[0]),
         "wheel_radius": float(r),
+        "wheel_volume_m3": float(abs(wheels[0].volume)),
         "wheel_width": float(width),
         "track_width": float(wc[0][1] - wc[1][1]),
         "axle_x": float((wc[0][0] + wc[1][0]) / 2),

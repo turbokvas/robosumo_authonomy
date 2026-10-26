@@ -43,7 +43,8 @@ def assets_xml() -> str:
 
 def robot_xml(name: str, pos: tuple[float, float], yaw: float, spec: dict, geo: dict, rgba: str) -> str:
     mass = get(spec, "robot.mass")
-    wheel_mass = get(spec, "sim.sim3d.wheel_mass")
+    # robot.mass is the whole robot; it is split between body and wheels by their CAD volumes (uniform density)
+    wheel_mass = mass * geo["wheel_volume_m3"] / (geo["body_volume_m3"] + 2 * geo["wheel_volume_m3"])
     com_x = geo["axle_x"] + get(spec, "robot.com_x_from_axle")
     com_z = get(spec, "sim.sim3d.com_height")
     armature = get(spec, "robot.motors.reflected_inertia_kgm2")

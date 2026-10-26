@@ -146,7 +146,8 @@ class SumoEnv3D:
         self.stop_drive = s3["stop_drive"]
         self.worm_damping = s3["worm_brake_damping"]
         self.worm_lock_speed = s3["worm_lock_speed"]
-        self.wheel_mass = s3["wheel_mass"]
+        geo_m = load_geometry()
+        self.wheel_share = geo_m["wheel_volume_m3"] / (geo_m["body_volume_m3"] + 2 * geo_m["wheel_volume_m3"])
 
         wp.init()
         # Warp works on its own stream (a graph cannot be captured on torch's legacy default stream); the two
@@ -227,13 +228,15 @@ class SumoEnv3D:
     def _apply_params(self, idx: torch.Tensor) -> None:
         """Push the (randomized) physical parameters of worlds idx into the MuJoCo model."""
         p = self.p
-        mb = 1 / p.inv_mass[idx] - 2 * self.wheel_mass  # [k,R]
+        mb = (1 / p.inv_mass[idx]) * (1 - 2 * self.wheel_share)  # [k,R] body share of the whole robot's mass
         com_z = get(self.spec, "sim.sim3d.com_height")
         L, W = self.half[0] * 2, self.half[1] * 2
         H = load_geometry()["body_height"]
         for r in range(physics.N_ROBOTS):
             b = self.body_id[r]
             self.m_mass[idx, b] = mb[:, r]
+            for wb in self.wheel_body[r]:  # body + 2 wheels = robot.mass exactly
+                self.m_mass[idx, wb] = (1 / p.inv_mass[idx, r]) * self.wheel_share
             ipos = torch.stack([p.com_x[idx, r], torch.zeros_like(mb[:, r]), torch.full_like(mb[:, r], com_z)], -1)
             self.m_ipos[idx, b] = ipos
             box = torch.tensor([W**2 + H**2, L**2 + H**2, L**2 + W**2], device=mb.device, dtype=mb.dtype)
