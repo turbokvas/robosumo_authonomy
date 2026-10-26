@@ -57,16 +57,17 @@ class PhysParams:
     com_x: torch.Tensor          # [N,R] CoM in body frame
     axle_x: float
     half_track: float
-    wheel_r: float
+    wheel_r: torch.Tensor        # [N,R]
     scoop_x: float
     tire_mu: torch.Tensor        # [N,R]
     scoop_mu: torch.Tensor       # [N,R]
     n_wheel: torch.Tensor        # [N,R] normal load per wheel
     n_scoop: torch.Tensor        # [N,R]
     tau_stall: torch.Tensor      # [N,R,2]
-    omega0: float                # no-load wheel speed at nominal voltage, rad/s
+    omega0: torch.Tensor         # [N,R] no-load wheel speed at nominal voltage, rad/s
     motor_tc: torch.Tensor       # [N,R]
-    deadband: torch.Tensor       # [N,R]
+    deadband: torch.Tensor       # [N,R] true motor deadband (duty)
+    deadband_cal: torch.Tensor   # [N,R] the firmware's calibrated estimate of it (true − calibration error)
     volt_ratio: torch.Tensor     # [N,R] V / V_nom
     j_wheel: float
     lift_max: torch.Tensor       # [N,R] max share of the opponent's wheel load this robot's wedge can take
@@ -74,6 +75,7 @@ class PhysParams:
     front_cos: float
     angle_adv: float             # rad
     clearance_adv: float
+    adv_deadband: float
     lift_time: float
     drop_time: float
 
@@ -101,8 +103,13 @@ def make_params(
     """Physical parameters for a batch. `fixed` [N,R] bool makes a robot an immovable obstacle (tests, curriculum)."""
     g = get(spec, "sim.gravity")
     mass = rand["robot.mass"]
-    n_envs = mass.shape[0]
-    device = mass.device
+
+    def val(name: str) -> torch.Tensor:
+        """A per-robot parameter: randomized if the spec has `<name>_rand`, else the spec value. M5 widens/adds
+        ranges in the spec only; the physics reads every such quantity through here."""
+        if name in rand.params:
+            return rand[name]
+        return torch.full_like(mass, float(get(spec, name)))
 
     footprint = get(spec, "robot.footprint")
     half = (footprint[0] / 2, footprint[1] / 2)
@@ -121,9 +128,9 @@ def make_params(
 
     motors = get(spec, "robot.motors")
     est = motors["est_16v"]
-    omega0 = est["no_load_rpm"] * 2 * math.pi / 60
+    omega0 = val("robot.motors.est_16v.no_load_rpm") * 2 * math.pi / 60
     mismatch = rand["robot.motors.left_right_mismatch"].sqrt()
-    tau_stall = (est["stall_torque_nm"] * rand["robot.motors.strength"]).unsqueeze(-1) * torch.stack(
+    tau_stall = (val("robot.motors.est_16v.stall_torque_nm") * rand["robot.motors.strength"]).unsqueeze(-1) * torch.stack(
         [mismatch, 1 / mismatch], dim=-1
     )
 
@@ -149,7 +156,7 @@ def make_params(
         com_x=com_x,
         axle_x=axle_x,
         half_track=get(spec, "robot.drive.track_width") / 2,
-        wheel_r=get(spec, "robot.drive.wheel_diameter") / 2,
+        wheel_r=val("robot.drive.wheel_diameter") / 2,
         scoop_x=scoop_x,
         tire_mu=rand["robot.drive.tire_mu"],
         scoop_mu=rand["robot.front.friction_mu"],
@@ -159,6 +166,7 @@ def make_params(
         omega0=omega0,
         motor_tc=rand["robot.motors.time_constant_s"],
         deadband=rand["robot.motors.deadband_pwm"],
+        deadband_cal=(rand["robot.motors.deadband_pwm"] - val("robot.motors.deadband_comp_error")).clamp(min=0),
         volt_ratio=rand["robot.power.voltage"] / get(spec, "robot.power.nominal_v_for_motor_model"),
         j_wheel=motors["reflected_inertia_kgm2"],
         lift_max=rand["robot.front.lift_fraction"],
@@ -166,6 +174,7 @@ def make_params(
         front_cos=math.cos(math.radians(wedge["front_cone_deg"])),
         angle_adv=math.radians(wedge["angle_advantage_deg"]),
         clearance_adv=wedge["clearance_advantage"],
+        adv_deadband=wedge["advantage_deadband"],
         lift_time=wedge["lift_time_s"],
         drop_time=wedge["drop_time_s"],
     )
@@ -339,8 +348,10 @@ def _update_lift(
     + (opponent's clearance − own) / clearance_adv, i.e. whoever came in at an angle, then the lower blade.
     The advantage is latched: whoever got under at impact stays under while the front contact lasts, even after
     the bodies swing flush (that happens within tens of ms), and the loser cannot get under the winner.
-    The winner works the blade under towards lift_max while pushing; the advantage sets how fast
-    (full advantage → lift_time, a tenth of it → 10× slower). Lift drops quickly once contact is lost.
+    How far the blade gets under is proportional to the advantage: lift → lift_max · share while pushing (over
+    lift_time), so a slightly better angle gives a slight lift, not the whole contest. An all-or-nothing rule made
+    tiny, unobservable differences decide matches and drove policy styles into rock-paper-scissors cycles.
+    Lift drops quickly once contact is lost.
     """
     if isinstance(dt2, torch.Tensor):
         down = 1 - torch.exp(-dt2 / p.drop_time)
@@ -349,17 +360,22 @@ def _update_lift(
     n_out = torch.stack([n01, -n01], dim=1)  # [N,R,2] from each robot towards the other
     cos = (n_out * fwd).sum(-1)
     front = cos > p.front_cos
-    mis = torch.acos(cos.clamp(-1, 1))
+    mis = torch.atan2(_cross(fwd, n_out).abs(), cos)  # atan2, not acos: acos near 1 turns float noise into 1e-4 rad
     adv = (mis - mis.flip(1)) / p.angle_adv + (p.clearance.flip(1) - p.clearance) / p.clearance_adv
+    # a near-tie is a clinch: without the deadband, float noise in symmetric contacts systematically picked robot 0
+    adv = (adv - p.adv_deadband) / (1 - p.adv_deadband)
     share = torch.where(front.flip(1), adv.clamp(0, 1), torch.ones_like(adv))  # opponent's front too → contest
     pushing = front & touching.unsqueeze(-1)
     latched = torch.maximum(state.wedge, torch.where(state.wedge.flip(1) > 0, torch.zeros_like(share), share))
     decayed = state.wedge * (1 - down)
     decayed = torch.where(decayed < WEDGE_EPS, torch.zeros_like(decayed), decayed)  # exp decay never hits 0
     state.wedge.copy_(torch.where(pushing, latched, decayed))
-    by_me = torch.where(pushing & (state.wedge > 0), p.lift_max, torch.zeros_like(share))
+    by_me = torch.where(pushing, p.lift_max * state.wedge, torch.zeros_like(share))
     target = by_me.flip(1)  # lift of each robot = what the other one's wedge achieves
-    up = 1 - torch.exp(-dt2 * state.wedge.flip(1) / p.lift_time)
+    if isinstance(dt2, torch.Tensor):
+        up = 1 - torch.exp(-dt2 / p.lift_time)
+    else:
+        up = 1 - math.exp(-dt2 / p.lift_time)
     alpha = torch.where(target > state.lift, up, down)
     state.lift.add_(alpha * (target - state.lift))
 
@@ -388,8 +404,9 @@ def step(
     alpha = (1 - torch.exp(-dt2 / p.motor_tc)).unsqueeze(-1)
     state.u_lag.add_(alpha * (u_m - state.u_lag))
     drive = state.u_lag * p.volt_ratio.unsqueeze(-1)
-    b = p.tau_stall / p.omega0
+    b = p.tau_stall / p.omega0.unsqueeze(-1)
     tau_m = p.tau_stall * drive - b * state.wheel_w
+    r_w = p.wheel_r.unsqueeze(-1)  # [N,R,1]
 
     # --- tires, wheel contact arms relative to the CoM: [N,R,2(wheel),2]
     arm_x = (p.axle_x - p.com_x).unsqueeze(-1)
@@ -397,16 +414,16 @@ def step(
     arms = arm_x.unsqueeze(-1) * fwd.unsqueeze(-2) + arm_y.view(1, 1, 2, 1) * left.unsqueeze(-2)
     v_pt = _point_vel(state.vel.unsqueeze(-2), state.omega.unsqueeze(-1), arms)
     fwd_w = fwd.unsqueeze(-2)
-    slip = v_pt - (state.wheel_w * p.wheel_r).unsqueeze(-1) * fwd_w
+    slip = v_pt - (state.wheel_w * r_w).unsqueeze(-1) * fwd_w
     mu_n = (p.tire_mu * p.n_wheel * (1 - state.lift)).unsqueeze(-1).expand_as(state.wheel_w)
     f_tire = _friction(slip, mu_n, p.s0)  # on the robot
 
     # --- wheel speed: J·dω/dt = τ_m − F_long·r, linearised backward Euler, then worm-gear clamp
     f_long = (f_tire * fwd_w).sum(-1)
     slip_mag = slip.norm(dim=-1)
-    k_t = mu_n * p.wheel_r**2 / p.s0 * (1 - torch.tanh(slip_mag / p.s0) ** 2)
-    w_new = state.wheel_w + dt3 * (tau_m - f_long * p.wheel_r) / (p.j_wheel + dt3 * (b + k_t))
-    w_free = drive * p.omega0
+    k_t = mu_n * r_w**2 / p.s0 * (1 - torch.tanh(slip_mag / p.s0) ** 2)
+    w_new = state.wheel_w + dt3 * (tau_m - f_long * r_w) / (p.j_wheel + dt3 * (b + k_t))
+    w_free = drive * p.omega0.unsqueeze(-1)
     state.wheel_w.copy_(torch.clamp(w_new, torch.minimum(w_free, torch.zeros_like(w_free)), torch.maximum(w_free, torch.zeros_like(w_free))))
 
     # --- scoop sliding on the ring

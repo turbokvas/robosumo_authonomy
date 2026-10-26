@@ -31,6 +31,25 @@ def load_spec(path: str | Path = SPEC_PATH) -> dict[str, Any]:
     return spec
 
 
+def apply_overrides(spec: dict[str, Any], overrides: list[str]) -> dict[str, Any]:
+    """Return a copy of spec with `dotted.key=value` overrides (value parsed as YAML), e.g.
+    ["robot.drive.wheel_diameter=0.08", "robot.motors.strength_rand=[1.0, 1.2]"]. Unknown keys are an error,
+    except a new `*_rand` range next to an existing base value."""
+    import copy
+
+    out = copy.deepcopy(spec)
+    for item in overrides:
+        key, _, raw = item.partition("=")
+        *path, leaf = key.strip().split(".")
+        node = out
+        for k in path:
+            node = node[k]
+        if leaf not in node and not (RAND_TAG in leaf and leaf.replace(RAND_TAG, "") in node):
+            raise KeyError(f"override {key}: no such spec key")
+        node[leaf] = yaml.safe_load(raw)
+    return out
+
+
 def get(spec: dict[str, Any], dotted: str) -> Any:
     node: Any = spec
     for key in dotted.split("."):

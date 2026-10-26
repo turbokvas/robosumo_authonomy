@@ -1,11 +1,15 @@
-"""Sensors as the robot's MCU sees them: 3× E18-D80NK (digital beams), 4 edge line sensors, battery ADC.
+"""Sensors as the robot's MCU sees them: 3 front + 2 side (reserved) E18-D80NK beams, 4 edge line sensors,
+battery ADC, and the reserved wheel encoders and IMU.
 
 Geometry is sampled every physics substep into a short history; reads at the control tick pick each robot's
 own latency out of it, then apply E18 noise (false negatives/positives, crosstalk from the opponent's identical E18).
 Output convention (sim side, before the firmware's active-low / colour mapping):
-    ir   [N,R,3] bool, order = spec mounts (left +15°, centre, right −15°), True = opponent detected
-    line [N,R,4] bool, order = spec mounts (front-left, front-right, rear-left, rear-right), True = over the black edge
+    ir      [N,R,3] bool, order = spec mounts (left +15°, centre, right −15°), True = opponent detected
+    ir_side [N,R,2] bool, side E18 (left +90°, right −90°), same model as the front ones
+    line    [N,R,4] bool, order = spec mounts (front-left, front-right, rear-left, rear-right), True = over the black edge
     battery [N,R] float = V / full_v
+    wheel_speed [N,R,2] rad/s from encoder counts per control period (quantized)
+    gyro_z [N,R] rad/s, accel_xy [N,R,2] m/s² in the body frame (CoM acceleration over the control period), noisy
 """
 
 from __future__ import annotations
@@ -18,7 +22,9 @@ import torch
 from sumo import physics
 from sumo.config import RandomizationBatch, get
 
-N_IR = 3
+N_FRONT_IR = 3
+N_SIDE_IR = 2
+N_IR = N_FRONT_IR + N_SIDE_IR
 N_LINE = 4
 _IR, _XT, _LINE = slice(0, N_IR), slice(N_IR, 2 * N_IR), slice(2 * N_IR, 2 * N_IR + N_LINE)
 
@@ -46,7 +52,8 @@ class Sensors:
         ir = get(spec, "robot.sensors.opponent_ir")
         self.device = device
         self.gen = generator
-        mounts = torch.tensor(ir["mounts"], device=device, dtype=torch.float32)  # [3, (x, y, deg)]
+        side = get(spec, "robot.sensors.side_ir.mounts")
+        mounts = torch.tensor(ir["mounts"] + side, device=device, dtype=torch.float32)  # [5, (x, y, deg)]
         self.ir_xy = mounts[:, :2]
         self.ir_angle = torch.deg2rad(mounts[:, 2])
         half_beam = math.radians(ir["beam_half_angle_deg"])
@@ -60,6 +67,10 @@ class Sensors:
         self.line_xy = torch.tensor(get(spec, "robot.sensors.edge.mounts"), device=device, dtype=torch.float32)
         self.edge_w = get(spec, "arena.edge_line_width")
         self.full_v = get(spec, "robot.power.full_v")
+        enc, imu = get(spec, "robot.sensors.encoders"), get(spec, "robot.sensors.imu")
+        self.counts_per_rev = enc["counts_per_wheel_rev"]
+        self.gyro_std, self.accel_std = imu["gyro_noise_std"], imu["accel_noise_std"]
+        self.gyro_range, self.accel_range = imu["gyro_range"], imu["accel_range"]
 
         # history long enough for the slowest latency at the fastest substep
         lat_max = max(get(spec, "robot.sensors.opponent_ir.latency_s_rand")[1], get(spec, "robot.sensors.edge.latency_s_rand")[1])
@@ -134,4 +145,20 @@ class Sensors:
         line = self._delayed(self.line_latency, substep_dt, _LINE)
         u = torch.rand(3, *beam.shape, device=self.device, generator=self.gen)
         ir = (beam & (u[0] >= self.fn_p)) | (u[1] < self.fp_p) | (xt & (u[2] < self.xt_p))
-        return {"ir": ir, "line": line, "battery": self.voltage / self.full_v}
+        return {"ir": ir[..., :N_FRONT_IR], "ir_side": ir[..., N_FRONT_IR:], "line": line,
+                "battery": self.voltage / self.full_v}
+
+    def motion(self, state: physics.PhysState, prev_vel: torch.Tensor, ctrl_dt: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Encoder wheel speed and IMU readings at the control tick. prev_vel: CoM velocity one control period ago."""
+        dt = ctrl_dt.view(-1, 1, 1)
+        rad_per_count = 2 * math.pi / self.counts_per_rev
+        counts = torch.round(state.wheel_w * dt / rad_per_count)
+        wheel_speed = counts * rad_per_count / dt
+        fwd = torch.stack([state.theta.cos(), state.theta.sin()], -1)
+        left = torch.stack([-fwd[..., 1], fwd[..., 0]], -1)
+        acc = (state.vel - prev_vel) / dt
+        acc_body = torch.stack([(acc * fwd).sum(-1), (acc * left).sum(-1)], -1)
+        noise = lambda x, std: x + std * torch.randn(x.shape, device=x.device, generator=self.gen)  # noqa: E731
+        gyro = noise(state.omega, self.gyro_std).clamp(-self.gyro_range, self.gyro_range)
+        accel = noise(acc_body, self.accel_std).clamp(-self.accel_range, self.accel_range)
+        return {"wheel_speed": wheel_speed, "gyro_z": gyro, "accel_xy": accel}

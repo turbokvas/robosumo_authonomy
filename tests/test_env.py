@@ -90,3 +90,36 @@ def test_cuda_graph_matches_eager(spec):
     for x, y in zip(a._sim_tensors(), b._sim_tensors()):
         assert torch.allclose(x.float(), y.float(), atol=1e-5)
     assert torch.equal(outs[0][1], outs[1][1])
+
+
+def test_mirror_symmetry(spec):
+    """Mirrored starts + identical commands must stay mirrored, also through contacts. Regression: float noise in
+    near-tie wedge contests used to hand the win to robot 0, which a policy trained in slot 0 learned to exploit."""
+    n = 128
+    env = SumoEnv(spec, n, DEVICE, randomize=False, seed=0, use_graph=False)
+    env.sensors.fn_p = env.sensors.fp_p = env.sensors.xt_p = 0.0
+    g = torch.Generator(DEVICE).manual_seed(0)
+    ang = torch.rand(n, device=DEVICE, generator=g) * 2 * math.pi
+    c0 = 0.25 * torch.stack([-ang.cos(), -ang.sin()], -1)
+    th0 = ang + (torch.rand(n, device=DEVICE, generator=g) - 0.5) * 0.6
+    physics.set_pose(env.state, env.p, torch.stack([c0, -c0], 1), torch.stack([th0, th0 + math.pi], 1))
+    env.sensors.prime(env.state, env.p)
+    ir_diff = 0.0
+    for _ in range(250):
+        a = 0.3 + 0.7 * torch.rand(n, 2, device=DEVICE, generator=g)
+        r, _, _ = env.step(torch.stack([a, a], 1))
+        ir_diff += (r["ir"][:, 0] != r["ir"][:, 1]).float().mean().item() / 250
+    assert ir_diff < 0.005  # only beams grazing a body edge may flip on 1e-6 m differences
+    c = physics.centers(env.state, env.p)
+    assert (c[:, 0] + c[:, 1]).norm(dim=-1).max() < 1e-4
+    assert torch.allclose(env.state.lift[:, 0], env.state.lift[:, 1], atol=1e-4)
+
+
+def test_side_by_side_sides_are_random(spec):
+    """Regression: side_by_side always put the opponent on robot 0's right, a slot-0 advantage of ~98% in self-play."""
+    env = SumoEnv(spec, 2048, DEVICE, start_modes=["side_by_side"], seed=0)
+    ctr = physics.centers(env.state, env.p)
+    to_other = ctr[:, 1] - ctr[:, 0]
+    fwd0 = torch.stack([env.state.theta[:, 0].cos(), env.state.theta[:, 0].sin()], -1)
+    on_right = (fwd0[:, 0] * to_other[:, 1] - fwd0[:, 1] * to_other[:, 0]) < 0
+    assert 0.45 < on_right.float().mean().item() < 0.55

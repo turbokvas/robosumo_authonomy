@@ -1,12 +1,17 @@
 # M4: self-play league. Starts from the M3 policy; opponents = stationary + FSMs + frozen policy snapshots (PFSP).
 
-run_name: m4_league
+run_name: m4_league_v3
 seed: 1
-init_ckpt: results/m3/ckpt_00500M.pt   # final M3 policy (500M steps, shaping fully annealed)
+init_ckpt: results/m3/ckpt_00500M_v2.pt   # M3 on interface v2 (memory inputs start at zero weight)
 
 env:
-  num_envs: 4096
+  num_envs: 16384                  # 4096 was launch-bound (16 ms/step); 4x envs ≈ 2.2x rollout throughput
   randomize: false                 # hardware *_rand still off (M5)
+  sensor_dropout:                  # імовірність, що резервна група сенсорів відсутня в матчі (interface v1)
+    bare: 0.5                      # імовірність матчу зовсім без резервних сенсорів (як теперішнє залізо)
+    side_ir: 0.5
+    encoders: 0.5
+    imu: 0.5
 
 reward:                            # shaping stays off: M3 already annealed it to 0
   win: 10.0
@@ -20,11 +25,11 @@ reward:                            # shaping stays off: M3 already annealed it t
 
 ppo:
   total_steps: 2_000_000_000
-  rollout: 64
+  rollout: 32                      # batch 16384×32 = 524k samples per update
   gamma: 0.995
   gae_lambda: 0.95
-  lr: 2.0e-4
-  epochs: 4
+  lr: 1.5e-4
+  epochs: 3                        # big batch: fewer passes, update time stays below rollout time
   minibatches: 8
   clip: 0.2
   ent_coef: 0.002
@@ -32,18 +37,25 @@ ppo:
   max_grad_norm: 1.0
   init_log_std: -1.5               # pretrained actor: start with little exploration noise
   critic_hidden: [256, 256]
-  critic_warmup_updates: 30        # fresh critic (new obs layout) learns before the actor moves
+  critic_warmup_updates: 30        # fresh critic (v2 critic input), learns before the actor moves
 
 league:
-  pool_size: 24                    # frozen snapshots kept (the first `anchors` are never overwritten)
-  anchors: 1                       # pool0 = the initial (M3) policy: regression anchor
+  pool_size: 32                    # frozen snapshots kept (the anchors are never overwritten)
+  anchors: 1                       # recomputed: initial policy + anchor_checkpoints
+  anchor_checkpoints:              # different styles from run 1's cycle (each beats some of the others)
+    - results/m4_run1/ckpt_00400M_v2.pt
+    - results/m4_run1/ckpt_01000M_v2.pt
+    - results/m4_run1/ckpt_02000M_v2.pt
+    - results/m4_run1/ckpt_02700M_v2.pt
+  anchor_share: 0.35               # share of episodes against the anchors
   snapshot_steps: 50_000_000
-  fixed_share: 0.3                 # share of episodes against stationary + FSMs, so old skills stay
+  fixed_share: 0.25                # share of episodes against stationary + FSMs, so old skills stay
   pfsp_power: 2.0                  # weight ∝ (1 − win_rate)^p: focus on opponents we lose to
   pfsp_floor: 0.02                 # keep a little weight on opponents already beaten
   win_ema: 0.01                    # per-episode EMA rate for the win-rate estimates
 
 eval:
-  every_steps: 100_000_000
+  every_steps: 200_000_000        # at ~430k steps/s that is every ~8 min
   matches: 1024
   video_matches: 6
+  video_every_evals: 2             # rendering is CPU-bound, ~1-2 min each

@@ -7,6 +7,11 @@ seed: 0
 env:
   num_envs: 4096
   randomize: false                 # hardware *_rand off until M5 (FSM params and sensor noise are always on)
+  sensor_dropout:                  # імовірність, що резервна група сенсорів відсутня в матчі (interface v1)
+    bare: 0.5                      # імовірність матчу зовсім без резервних сенсорів (як теперішнє залізо)
+    side_ir: 0.5
+    encoders: 0.5
+    imu: 0.5
 
 reward:
   win: 10.0

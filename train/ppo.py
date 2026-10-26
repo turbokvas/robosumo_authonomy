@@ -23,9 +23,10 @@ import torch
 import yaml
 from torch.utils.tensorboard import SummaryWriter
 
+from sumo import interface as iface
 from sumo.config import SPEC_PATH, get, load_spec
-from sumo.env import DRAW, FRAME_DIM, SumoTask
-from train.eval import evaluate, video
+from sumo.env import DRAW, SumoTask
+from train.eval import evaluate_many, video
 from train.league import League, PolicyPool
 from train.models import Actor, Critic
 
@@ -76,13 +77,17 @@ def main() -> None:
     args = ap.parse_args()
 
     ckpt = torch.load(args.resume, map_location=args.device, weights_only=False) if args.resume else None
+    if ckpt:
+        iface.check_checkpoint(ckpt, args.resume)
     if args.config:
         cfg = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
     elif ckpt:
         cfg = ckpt["cfg"]
     else:
         ap.error("--config or --resume is required")
-    spec = ckpt["spec"] if ckpt else load_spec()
+    spec = load_spec()  # always the current spec: it has to match the current sim code
+    if ckpt and ckpt["spec"] != spec:
+        print("note: robot_spec.yaml changed since this checkpoint was written; continuing with the current one")
     pc, rc, cc, ec = cfg["ppo"], cfg["reward"], cfg.get("curriculum"), cfg["eval"]
     total = args.total_steps or pc["total_steps"]
     dev = args.device
@@ -103,9 +108,10 @@ def main() -> None:
     print(f"run: {run_dir}  (git {commit})")
 
     n, T = cfg["env"]["num_envs"], pc["rollout"]
-    hidden = get(spec, "controller.policy.hidden")
+    iface.check_spec(spec)
+    hidden = list(iface.HIDDEN)
     lc = cfg.get("league")
-    pool = PolicyPool(lc["pool_size"], get(spec, "controller.policy.obs_frame_stack") * FRAME_DIM, hidden, dev) if lc else None
+    pool = PolicyPool(lc["pool_size"], iface.OBS_DIM, hidden, dev) if lc else None
     task = SumoTask(spec, cfg, n, dev, cfg["seed"], pool=pool)
     stages = cc["stages"] if cc else [{"name": "league", "opponents": {}}]
     stage = 0
@@ -115,11 +121,16 @@ def main() -> None:
     window = WinWindow(cc["window"], dev) if cc else None
 
     obs_dim, cobs_dim = task.obs().shape[1], task.critic_obs().shape[1]
-    actor = Actor(obs_dim, hidden, init_log_std=pc["init_log_std"]).to(dev)
+    actor = Actor(obs_dim, hidden, init_log_std=pc["init_log_std"], zero_inputs=iface.reserved_obs_columns()).to(dev)
     critic = Critic(cobs_dim, pc["critic_hidden"]).to(dev)
     init = None if ckpt else (args.init or cfg.get("init_ckpt"))
     if init:
-        actor.load_state_dict(torch.load(ROOT / init, map_location=dev, weights_only=False)["actor"])
+        init_ckpt = torch.load(ROOT / init, map_location=dev, weights_only=False)
+        iface.check_checkpoint(init_ckpt, init)
+        actor.load_state_dict(init_ckpt["actor"])
+        if "critic" in init_ckpt and init_ckpt.get("cobs_dim") == cobs_dim:
+            critic.load_state_dict(init_ckpt["critic"])
+            print("critic initialised from the same checkpoint")
         with torch.no_grad():
             actor.log_std.fill_(pc["init_log_std"])
         print(f"actor initialised from {init}")
@@ -137,6 +148,14 @@ def main() -> None:
         print(f"resumed {args.resume} at step {step:,}, stage {stages[stage]['name']}")
     elif league:
         print("pool:", league.add_snapshot(actor, "init"), "= anchor (initial policy)")
+        for path in lc.get("anchor_checkpoints", []):
+            anchor_ckpt = torch.load(ROOT / path, map_location=dev, weights_only=False)
+            iface.check_checkpoint(anchor_ckpt, path)
+            a = Actor(obs_dim, hidden).to(dev)
+            a.load_state_dict(anchor_ckpt["actor"])
+            print("pool:", league.add_snapshot(a, path), "= anchor", path)
+    if league:
+        league.cfg["anchors"] = 1 + len(lc.get("anchor_checkpoints", []))
     if league:
         task.opp_weights = league.weights()
     task._new_episodes(torch.ones(n, dtype=torch.bool, device=dev))
@@ -164,6 +183,7 @@ def main() -> None:
             "step": step, "stage": stage, "obs_dim": obs_dim, "cobs_dim": cobs_dim,
             "cfg": cfg, "spec": spec, "git": commit,
         }
+        iface.stamp(state, spec)
         if league:
             state["league"] = league.state()
         paths = [run_dir / "ckpt_latest.pt"] + ([run_dir / f"ckpt_{tag}.pt"] if tag else [])
@@ -177,6 +197,7 @@ def main() -> None:
     next_eval, next_ckpt, update = (step // ev + 1) * ev, (step // ck + 1) * ck, 0
     next_snapshot = (step // lc["snapshot_steps"] + 1) * lc["snapshot_steps"] if lc else 0
     t_resume = step
+    n_evals = 0
     t_start = time.perf_counter()
     while step < total:
         task.shaping_scale = max(0.0, 1.0 - step / rc["shaping_anneal_steps"])
@@ -294,19 +315,29 @@ def main() -> None:
         if step >= next_eval or step >= total:
             next_eval += ec["every_steps"]
             actor.eval()
+            anchors = [f"pool{i}" for i in range(league.cfg["anchors"])] if league else []
+            names = task.opp_names[: task.n_fsm + 1] + anchors
+            # all opponents in one batch (sequential evals took longer than the training between them)
+            ev = evaluate_many(actor, spec, cfg, names, ec["matches"], dev, pool=pool)
             res = {}
-            for name in task.opp_names[: task.n_fsm + 1] + (["pool0"] if league else []):
-                r = evaluate(actor, spec, cfg, name, ec["matches"], dev, pool=pool)
+            for name, r in ev.items():
                 res[name] = r["win"]
                 writer.add_scalar(f"eval_win/{name}", r["win"], step)
                 writer.add_scalar(f"eval_draw/{name}", r["draw"], step)
+                writer.add_scalar(f"eval_score/{name}", r["win"] + 0.5 * r["draw"], step)
+            if anchors:
+                # score = win + draw/2 (Elo convention): many anchor games end in a clinch, wins alone mislead
+                res["anchor_score"] = sum(ev[a]["win"] + 0.5 * ev[a]["draw"] for a in anchors) / len(anchors)
+                writer.add_scalar("eval_score/anchor_mean", res["anchor_score"], step)
             path = save(f"{step // 1_000_000:05d}M")
             print(f"[{step:,}] eval " + "  ".join(f"{k[:10]} {v:.0%}" for k, v in res.items()) + f"  → {path.name}", flush=True)
-            try:
-                video(actor, spec, cfg, ["aggressive", "spinner", "random_walker"], ec["video_matches"] // 3, dev,
-                      run_dir / f"video_{step // 1_000_000:05d}M.mp4")
-            except FileNotFoundError:
-                print("ffmpeg not on PATH, skipping video")
+            n_evals += 1
+            if (n_evals - 1) % ec.get("video_every_evals", 1) == 0:  # rendering runs on the CPU, ~1-2 min
+                try:
+                    video(actor, spec, cfg, ["aggressive", "spinner", "random_walker"], ec["video_matches"] // 3, dev,
+                          run_dir / f"video_{step // 1_000_000:05d}M.mp4")
+                except FileNotFoundError:
+                    print("ffmpeg not on PATH, skipping video")
             actor.train()
 
     writer.close()

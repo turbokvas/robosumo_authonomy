@@ -1,0 +1,14 @@
+[100,139,008] eval stationary 94%  aggressive 85%  cautious_e 89%  spinner 88%  random_wal 90%  pool0 59%  pool1 36%  pool2 26%  pool3 24%  pool4 46%  anchor_mea 38%  → ckpt_00100M.pt
+[200,015,872] eval stationary 89%  aggressive 87%  cautious_e 90%  spinner 85%  random_wal 89%  pool0 55%  pool1 36%  pool2 27%  pool3 27%  pool4 47%  anchor_mea 38%  → ckpt_00200M.pt
+[300,154,880] eval stationary 92%  aggressive 88%  cautious_e 91%  spinner 90%  random_wal 91%  pool0 60%  pool1 40%  pool2 31%  pool3 29%  pool4 48%  anchor_mea 41%  → ckpt_00300M.pt
+[400,293,888] eval stationary 91%  aggressive 87%  cautious_e 91%  spinner 89%  random_wal 91%  pool0 61%  pool1 44%  pool2 33%  pool3 32%  pool4 45%  anchor_mea 43%  → ckpt_00400M.pt
+[500,432,896] eval stationary 91%  aggressive 90%  cautious_e 90%  spinner 89%  random_wal 92%  pool0 57%  pool1 48%  pool2 42%  pool3 41%  pool4 46%  anchor_mea 47%  → ckpt_00500M.pt
+[600,047,616] eval stationary 91%  aggressive 89%  cautious_e 90%  spinner 90%  random_wal 91%  pool0 58%  pool1 50%  pool2 42%  pool3 42%  pool4 48%  anchor_mea 48%  → ckpt_00600M.pt
+[700,186,624] eval stationary 90%  aggressive 89%  cautious_e 91%  spinner 91%  random_wal 91%  pool0 57%  pool1 49%  pool2 41%  pool3 42%  pool4 51%  anchor_mea 48%  → ckpt_00700M.pt
+[800,325,632] eval stationary 90%  aggressive 89%  cautious_e 91%  spinner 93%  random_wal 90%  pool0 61%  pool1 50%  pool2 42%  pool3 42%  pool4 54%  anchor_mea 50%  → ckpt_00800M.pt
+[1,000,079,360] eval stationary 88%  aggressive 91%  cautious_e 91%  spinner 91%  random_wal 92%  pool0 64%  pool1 53%  pool2 45%  pool3 44%  pool4 57%  anchor_sco 64%  → ckpt_01000M.pt
+[1,200,357,376] eval stationary 92%  aggressive 92%  cautious_e 90%  spinner 92%  random_wal 92%  pool0 67%  pool1 54%  pool2 46%  pool3 45%  pool4 58%  anchor_sco 66%  → ckpt_01200M.pt
+[1,400,111,104] eval stationary 91%  aggressive 93%  cautious_e 89%  spinner 92%  random_wal 92%  pool0 65%  pool1 53%  pool2 47%  pool3 46%  pool4 59%  anchor_sco 66%  → ckpt_01400M.pt
+[1,600,389,120] eval stationary 93%  aggressive 93%  cautious_e 92%  spinner 93%  random_wal 93%  pool0 70%  pool1 54%  pool2 48%  pool3 45%  pool4 63%  anchor_sco 68%  → ckpt_01600M.pt
+[1,800,142,848] eval stationary 92%  aggressive 93%  cautious_e 94%  spinner 93%  random_wal 92%  pool0 67%  pool1 52%  pool2 47%  pool3 44%  pool4 62%  anchor_sco 66%  → ckpt_01800M.pt
+[2,000,420,864] eval stationary 97%  aggressive 93%  cautious_e 91%  spinner 94%  random_wal 92%  pool0 68%  pool1 55%  pool2 48%  pool3 46%  pool4 61%  anchor_sco 67%  → ckpt_02000M.pt
