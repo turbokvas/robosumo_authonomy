@@ -44,10 +44,15 @@ def load_solids(step: Path) -> list[trimesh.Trimesh]:
     return sorted(solids, key=lambda p: -abs(p.volume))
 
 
-def collision_boxes(body: trimesh.Trimesh, t: float, clearance: float, scoop_z=(0.004, 0.011)) -> list[dict]:
+def collision_boxes(body: trimesh.Trimesh, t: float, clearance: float, edge_r: float,
+                    scoop_z=(0.004, 0.011)) -> tuple[list[dict], dict]:
     """Boxes (centre, half sizes, pitch about y in degrees) approximating the body for contacts, from the CAD profile
     at y = 0: main box behind the vertical front face, the front lip, and plates along the scoop curve split where
-    it reaches the heights in scoop_z."""
+    it reaches the heights in scoop_z; plus the blade edge (a capsule of radius edge_r along y touching the ring at
+    the tip). The front plate starts on the edge's axis and is thinner than its radius, so its end face is inside
+    the capsule: a box end face at the tip is tilted with the plate (14° here) and its normal pushed whoever drove
+    into it up the other blade, beaching it on its tail."""
+    assert t < edge_r, "scoop plates must be thinner than the blade edge radius"
     sec = body.section(plane_origin=[0, 0, 0], plane_normal=[0, 1, 0])
     prof = max(sec.discrete, key=len)[:, [0, 2]]
     half_w = (body.bounds[1, 1] - body.bounds[0, 1]) / 2
@@ -59,7 +64,8 @@ def collision_boxes(body: trimesh.Trimesh, t: float, clearance: float, scoop_z=(
     lip = prof[prof[:, 1] > 0.06]
     lip_x, lip_z = lip[:, 0].max(), lip[lip[:, 0] > face_x, 1]
     scoop_top = curve[:, 1].max()
-    knots = [curve[0]] + [curve[np.argmin(np.abs(curve[:, 1] - z))] for z in scoop_z] + [curve[np.argmax(curve[:, 1])]]
+    edge = np.array([tip_x - edge_r, edge_r])  # capsule axis: front at the tip, bottom on the ring
+    knots = [edge] + [curve[np.argmin(np.abs(curve[:, 1] - z))] for z in scoop_z] + [curve[np.argmax(curve[:, 1])]]
 
     boxes = [{"name": "main", "pos": [(face_x + body.bounds[0, 0]) / 2, 0.0, (clearance + top) / 2],
               "size": [(face_x - body.bounds[0, 0]) / 2, half_w, (top - clearance) / 2], "pitch_deg": 0.0}]
@@ -71,24 +77,23 @@ def collision_boxes(body: trimesh.Trimesh, t: float, clearance: float, scoop_z=(
         length = float(np.hypot(*d))
         th = float(np.arctan2(d[1], -d[0]))  # slope from horizontal
         inward = np.array([-np.sin(th), -np.cos(th)])  # into the material, below/behind the surface
-        c = (a + b) / 2 + inward * t / 2
-        low = min((a + inward * t)[1], (b + inward * t)[1])
-        c[1] -= min(low, 0.0)  # keep the plate above the ring (tip stays at ~0)
+        c = (a + b) / 2 + inward * t / 2  # top face on the profile; plates touch only the other robot (model.py)
         boxes.append({"name": f"scoop{i}", "pos": [float(c[0]), 0.0, float(c[1])],
                       "size": [length / 2, half_w, t / 2], "pitch_deg": float(np.degrees(th))})
     for bx in boxes:
         bx["pos"] = [float(v) for v in bx["pos"]]
         bx["size"] = [float(v) for v in bx["size"]]
     print("collision boxes:", ", ".join(f"{b['name']}@{b['pitch_deg']:.0f}°" for b in boxes),
-          f"(scoop top {scoop_top * 1000:.1f} mm)")
-    return boxes
+          f"(scoop top {scoop_top * 1000:.1f} mm), blade edge r {edge_r * 1000:.1f} mm")
+    return boxes, {"x": float(edge[0]), "z": float(edge[1]), "radius": float(edge_r)}
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--step", type=Path, default=ASSETS / "robot_mdl.step")
     ap.add_argument("--scoop-slabs", type=int, default=2, help="convex slabs across the curved scoop")
-    ap.add_argument("--plate-thickness", type=float, default=0.002, help="scoop plates (collision boxes), m")
+    ap.add_argument("--plate-thickness", type=float, default=0.0008,
+                    help="scoop plates (collision boxes), m; below sim.sim3d.blade_edge_radius")
     ap.add_argument("--underbody-clearance", type=float, default=0.003,
                     help="the main collision piece starts this high: only wheels and the blade touch the ring")
     args = ap.parse_args()
@@ -144,7 +149,8 @@ def main() -> None:
 
     b_lo, b_hi = body.bounds
     tip = body.vertices[np.argmax(body.vertices[:, 0])]
-    boxes = collision_boxes(body, args.plate_thickness, args.underbody_clearance)
+    boxes, edge = collision_boxes(body, args.plate_thickness, args.underbody_clearance,
+                                  get(load_spec(), "sim.sim3d.blade_edge_radius"))
     geom = {
         "source": str(args.step.relative_to(ASSETS.parent.parent)).replace("\\", "/"),
         "body_length": float(b_hi[0] - b_lo[0]),
@@ -161,6 +167,7 @@ def main() -> None:
         "wheel_bottom_z": float(min(w.bounds[0, 2] for w in wheels)),
         "collision_pieces": len(parts),
         "collision_boxes": boxes,
+        "blade_edge": edge,
     }
     (OUT / "geometry.yaml").write_text(yaml.safe_dump(geom, sort_keys=False), encoding="utf-8")
 

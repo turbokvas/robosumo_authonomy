@@ -3,9 +3,11 @@
 Geometry (meshes, axle position, wheel size) comes from sim3d/assets/generated/geometry.yaml, i.e. from the CAD;
 mass, centre of mass and every physical coefficient from the spec (nominal values here; SumoEnv3D overwrites them
 per world for randomization). Contacts use primitives only (analytic in MuJoCo, see build_assets): the body is a
-main box, a lip box and sloped plates along the scoop profile; wheels are cylinders that touch only the ring;
-the ring is a plane by default (`sim.sim3d.platform`), losing is decided by the CoM rule as in 2D.
-Collision bits: ring contype 1/conaffinity 1, bodies 3/2 (ring and each other), wheels 1/0 (ring only).
+main box, a lip box, sloped plates along the scoop profile and a thin capsule along the blade edge (the sharp
+tip: the only part of the blade touching the ring, and symmetric when two tips meet head-on); wheels are cylinders
+that touch only the ring; the ring is a plane by default (`sim.sim3d.platform`), losing is decided by the CoM rule
+as in 2D. Collision bits: ring contype 1/conaffinity 1, body boxes and blade edge 3/2 (ring and each other),
+scoop plates 2/2 (the other robot only), wheels 1/0 (ring only).
 Each wheel has a motor actuator, force = τ_stall·ctrl − (τ_stall/ω₀)·ω (the DC motor torque-speed line; ctrl = drive
 fraction · V/V_nom), and the gearbox's reflected inertia as joint armature. The worm gear's self-locking is joint
 damping that SumoEnv3D switches on per world while the motor is stopped (integrated implicitly, so it can be stiff;
@@ -46,7 +48,7 @@ def robot_xml(name: str, pos: tuple[float, float], yaw: float, spec: dict, geo: 
     # robot.mass is the whole robot; it is split between body and wheels by their CAD volumes (uniform density)
     wheel_mass = mass * geo["wheel_volume_m3"] / (geo["body_volume_m3"] + 2 * geo["wheel_volume_m3"])
     com_x = geo["axle_x"] + get(spec, "robot.com_x_from_axle")
-    com_z = get(spec, "sim.sim3d.com_height")
+    com_z = get(spec, "robot.com_height")
     armature = get(spec, "robot.motors.reflected_inertia_kgm2")
     L, W, H = geo["body_length"], geo["body_width"], geo["body_height"]
     mb = mass - 2 * wheel_mass
@@ -57,10 +59,16 @@ def robot_xml(name: str, pos: tuple[float, float], yaw: float, spec: dict, geo: 
     scoop = get(spec, "robot.front.friction_mu")
     cols = "".join(
         f'<geom name="{name}_{b["name"]}" type="box" size="{b["size"][0]} {b["size"][1]} {b["size"][2]}" '
-        f'pos="{b["pos"][0]} {b["pos"][1]} {b["pos"][2]}" euler="0 {b["pitch_deg"]} 0" contype="3" conaffinity="2" '
+        f'pos="{b["pos"][0]} {b["pos"][1]} {b["pos"][2]}" euler="0 {b["pitch_deg"]} 0" '
+        f'contype="{2 if b["name"].startswith("scoop") else 3}" conaffinity="2" '
         f'friction="{scoop} 0.005 0.0001" rgba="{rgba}" group="3"/>'
         for b in geo["collision_boxes"]
     )
+    e = geo["blade_edge"]
+    er = e["radius"]
+    assert abs(er - get(spec, "sim.sim3d.blade_edge_radius")) < 1e-9, "blade edge changed: run sim3d.build_assets"
+    cols += (f'<geom name="{name}_edge" type="capsule" size="{er} {W / 2 - er}" pos="{e["x"]} 0 {e["z"]}" '
+             f'euler="90 0 0" contype="3" conaffinity="2" friction="{scoop} 0.005 0.0001" rgba="{rgba}" group="3"/>')
     wheels = "".join(f"""
       <body name="{name}_w{s}" pos="{ax} {sign * half} {az}">
         <joint name="{name}_j{s}" type="hinge" axis="0 1 0" damping="0.0" armature="{armature}"/>

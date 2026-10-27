@@ -11,6 +11,7 @@ One match per env, deterministic actions (mean).
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import math
 import sys
@@ -82,6 +83,12 @@ def evaluate(
 
 
 @torch.no_grad()
+def _free_gpu() -> None:
+    """Hand torch's cached blocks back before/after building an eval env next to the training one."""
+    gc.collect()
+    torch.cuda.empty_cache()
+
+
 def evaluate_many(
     actor: Actor,
     spec: dict[str, Any],
@@ -92,9 +99,22 @@ def evaluate_many(
     pool: PolicyPool | None = None,
     seed: int = 4242,
     sensors: str = "installed",
+    max_envs: int = 2048,
 ) -> dict[str, dict[str, float]]:
-    """`matches` first episodes against each of `opponents`, all in one batch → {name: {win, loss, draw}}."""
+    """`matches` first episodes against each of `opponents` → {name: {win, loss, draw}}. Opponents are batched
+    together up to max_envs worlds: an eval env sits next to the training env on an 8 GB card (M5 ran out of
+    memory at a 9216-world 3D eval)."""
+    per = max(1, max_envs // matches)
+    if len(opponents) > per:
+        out = {}
+        for i in range(0, len(opponents), per):
+            out.update(evaluate_many(actor, spec, cfg, opponents[i:i + per], matches, device, pool, seed + i, sensors,
+                                     max_envs))
+        return out
     n = matches * len(opponents)
+    # a second (3D) env next to the training one: hand cached blocks back first, or the two allocators (torch,
+    # Warp) can run an 8 GB card out of memory (M5 died this way at its 400M eval)
+    _free_gpu()
     task = SumoTask(spec, cfg, n, device, seed, pool=pool, sensors=sensors)
     types = torch.tensor([task.opp_names.index(o) for o in opponents], device=device).repeat_interleave(matches)
     task.opp_type.copy_(types)
@@ -110,6 +130,8 @@ def evaluate_many(
         r = result[i * matches:(i + 1) * matches]
         out[name] = {"win": (r == 0).float().mean().item(), "loss": (r == 1).float().mean().item(),
                      "draw": (r == DRAW).float().mean().item()}
+    del task
+    _free_gpu()
     return out
 
 
@@ -158,6 +180,23 @@ def regression(ckpt: str, suite_path: str, device: str, spec: dict, baseline: st
         base = run(baseline)
         drops = {n: base[n] - cand[n] for n in names if base[n] >= suite["beaten_at"] and base[n] - cand[n] > suite["tolerance"]}
         out.update(baseline=base, regressions=drops, passed=not drops)
+    return out
+
+
+def extreme_eval(ckpt: str, suite_path: str, device: str, sim: str | None = None) -> dict[str, Any]:
+    """Win rates on nominal hardware and on each extreme scenario (configs/eval_extreme.yaml), randomization off."""
+    suite = yaml.safe_load(Path(suite_path).read_text(encoding="utf-8"))
+    base = load_spec()
+    out: dict[str, Any] = {}
+    for name, overrides in suite["scenarios"].items():
+        spec = apply_overrides(base, overrides)
+        actor, spec, cfg = load_actor(ckpt, device, spec)
+        cfg = {**cfg, "env": {**cfg["env"], "randomize": False, **({"sim": sim} if sim else {})}}
+        res = evaluate_many(actor, spec, cfg, suite["opponents"], suite["matches"], device)
+        out[name] = {"per_opponent": res, "win": sum(r["win"] for r in res.values()) / len(res)}
+    nominal = out["nominal"]["win"]
+    for name, r in out.items():
+        r["drop"] = (nominal - r["win"]) / max(nominal, 1e-6)  # relative to nominal
     return out
 
 
@@ -220,6 +259,7 @@ def main() -> None:
     ap.add_argument("--matrix", nargs="+", default=None, help="checkpoints for a round-robin + Elo")
     ap.add_argument("--out", default=None, help="write the round-robin / regression result as JSON")
     ap.add_argument("--regression", default=None, help="regression suite yaml (fixed opponents and seeds)")
+    ap.add_argument("--extreme", default=None, help="nominal vs extreme hardware scenarios (configs/eval_extreme.yaml)")
     ap.add_argument("--baseline", default=None, help="with --regression: checkpoint the candidate must not fall behind")
     ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="spec override (repeatable)")
     ap.add_argument("--sim", default=None, choices=["2d", "3d"], help="override the simulator (default: as trained)")
@@ -229,6 +269,17 @@ def main() -> None:
     ap.add_argument("--video", type=int, default=0, help="matches per opponent type to record")
     ap.add_argument("--device", default="cuda")
     args = ap.parse_args()
+    if args.extreme:
+        ex = extreme_eval(args.ckpt, args.extreme, args.device, args.sim)
+        opps = list(next(iter(ex.values()))["per_opponent"])
+        print(f"{'scenario':>14} {'mean win':>9} {'drop':>7}  " + "".join(f"{o[:10]:>11}" for o in opps))
+        for name, r in ex.items():
+            flag = "" if r["drop"] <= 0.15 else "  > 15%"
+            print(f"{name:>14} {r['win']:9.1%} {r['drop']:7.1%}  "
+                  + "".join(f"{r['per_opponent'][o]['win']:11.0%}" for o in opps) + flag)
+        if args.out:
+            Path(args.out).write_text(json.dumps(ex, indent=2), encoding="utf-8")
+        return
     spec = apply_overrides(load_spec(), args.set)
     if args.set:
         print("spec overrides:", ", ".join(args.set))

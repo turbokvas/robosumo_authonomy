@@ -192,7 +192,7 @@ class SumoEnv3D:
         import numpy as np
 
         for name in ("body_mass", "body_ipos", "body_inertia", "geom_friction", "geom_size", "geom_rbound",
-                     "actuator_gainprm", "actuator_biasprm", "dof_damping"):
+                     "actuator_gainprm", "actuator_biasprm", "dof_damping", "body_pos", "geom_pos"):
             a = getattr(self.mm, name)
             setattr(self.mm, name, wp.array(np.repeat(a.numpy(), self.n, axis=0), dtype=a.dtype))
         t = wp.to_torch
@@ -200,6 +200,8 @@ class SumoEnv3D:
         self.m_friction, self.m_size, self.m_rbound = t(self.mm.geom_friction), t(self.mm.geom_size), t(self.mm.geom_rbound)
         self.m_gain, self.m_bias = t(self.mm.actuator_gainprm), t(self.mm.actuator_biasprm)
         self.m_damping = t(self.mm.dof_damping)
+        self.m_body_pos = t(self.mm.body_pos)
+        self.m_geom_pos = t(self.mm.geom_pos)
 
     def _index_model(self) -> None:
         m = self.mjm
@@ -221,7 +223,18 @@ class SumoEnv3D:
         self.wheel_geoms = [[g for g in range(m.ngeom) if m.geom_bodyid[g] in self.wheel_body[r]] for r in range(2)]
         self.body_geoms = [[g for g in range(m.ngeom) if m.geom_bodyid[g] == self.body_id[r] and m.geom_contype[g]]
                            for r in range(2)]
-        self.has_floor = m.geom("dohyo").type != mujoco.mjtGeom.mjGEOM_PLANE
+        self.wheel_half_w = float(m.geom_size[self.wheel_geoms[0][0]][1])
+        # per robot, (left, right): the wheel geom and its axle offset (x, y) from the body origin
+        self.wheel_geom_lr = [[next(g for g in range(m.ngeom) if m.geom_bodyid[g] == wb) for wb in self.wheel_body[r]]
+                              for r in range(physics.N_ROBOTS)]
+        geo = load_geometry()
+        self.axle_z, self.cad_wheel_r = geo["axle_z"], geo["wheel_radius"]
+        half = geo["track_width"] / 2
+        self.wheel_xy = torch.tensor([[geo["axle_x"], half], [geo["axle_x"], -half]], device=dev)  # [2 wheels, xy]
+        self.slide_vel = get(self.spec, "robot.drive.tire_slide_vel")
+        self.edge_geom = [m.geom(f"{r}_edge").id for r in ROBOTS]
+        self.edge_tip_x = geo["blade_edge"]["x"] + geo["blade_edge"]["radius"]
+        self.edge_half_len = float(m.geom_size[self.edge_geom[0]][1])
         self.dohyo = m.geom("dohyo").id
         self.dohyo_halfh = float(m.geom_size[self.dohyo][1])
 
@@ -229,7 +242,8 @@ class SumoEnv3D:
         """Push the (randomized) physical parameters of worlds idx into the MuJoCo model."""
         p = self.p
         mb = (1 / p.inv_mass[idx]) * (1 - 2 * self.wheel_share)  # [k,R] body share of the whole robot's mass
-        com_z = get(self.spec, "sim.sim3d.com_height")
+        com_h = self.rand["robot.com_height"][idx]  # [k,R]
+        edge_r = get(self.spec, "sim.sim3d.blade_edge_radius") + p.clearance[idx]  # blunter edge: higher axis
         L, W = self.half[0] * 2, self.half[1] * 2
         H = load_geometry()["body_height"]
         for r in range(physics.N_ROBOTS):
@@ -237,14 +251,26 @@ class SumoEnv3D:
             self.m_mass[idx, b] = mb[:, r]
             for wb in self.wheel_body[r]:  # body + 2 wheels = robot.mass exactly
                 self.m_mass[idx, wb] = (1 / p.inv_mass[idx, r]) * self.wheel_share
-            ipos = torch.stack([p.com_x[idx, r], torch.zeros_like(mb[:, r]), torch.full_like(mb[:, r], com_z)], -1)
+            ipos = torch.stack([p.com_x[idx, r], torch.zeros_like(mb[:, r]), com_h[:, r]], -1)
             self.m_ipos[idx, b] = ipos
             box = torch.tensor([W**2 + H**2, L**2 + H**2, L**2 + W**2], device=mb.device, dtype=mb.dtype)
             self.m_inertia[idx, b] = box * mb[:, r:r + 1] / 12
             for g in self.wheel_geoms[r]:
                 self.m_friction[idx, g, 0] = p.tire_mu[idx, r]
+                # wheel radius (M5 randomization). The axle mount moves with the wheel so the ride height stays
+                # (fitting Ø60 wheels on the Ø70 axle would sit the 1.4-3 mm underbody on the ring)
+                self.m_size[idx, g, 0] = p.wheel_r[idx, r]
+                self.m_rbound[idx, g] = torch.sqrt(p.wheel_r[idx, r] ** 2 + self.wheel_half_w**2)
+            for wb in self.wheel_body[r]:
+                self.m_body_pos[idx, wb, 2] = self.axle_z + (p.wheel_r[idx, r] - self.cad_wheel_r)
             for g in self.body_geoms[r]:
                 self.m_friction[idx, g, 0] = p.scoop_mu[idx, r]
+            # blade edge: front stays at the CAD tip, bottom on the ring (the plates start inside it)
+            e, er = self.edge_geom[r], edge_r[:, r]
+            self.m_size[idx, e, 0] = er
+            self.m_rbound[idx, e] = er + self.edge_half_len
+            self.m_geom_pos[idx, e, 0] = self.edge_tip_x - er
+            self.m_geom_pos[idx, e, 2] = er
             for w in range(2):
                 tau = p.tau_stall[idx, r, w]
                 self.m_gain[idx, self.motor[r][w], 0] = tau
@@ -324,10 +350,28 @@ class SumoEnv3D:
         if prev_pos is not None:
             st.lift = ((com[..., 2] - self.rest_z) / 0.05).clamp(min=0)
 
+    def _tire_friction(self) -> None:
+        """Static vs sliding tire friction, which MuJoCo does not distinguish: μ for a rolling wheel, falling to
+        μ·tire_slide_ratio as the contact slips (exp(-slip/tire_slide_vel)). Uses the velocities of the last control
+        step, so it lags by one tick."""
+        p, st = self.p, self.state
+        c, s = st.theta.cos(), st.theta.sin()                                    # [N,R]
+        k = self.rand["robot.drive.tire_slide_ratio"]
+        for r in range(physics.N_ROBOTS):
+            v = self.qvel[:, self.free_dadr[r]:self.free_dadr[r] + 2]             # body origin, world xy
+            for w in range(2):
+                lx, ly = self.wheel_xy[w]
+                ox, oy = c[:, r] * lx - s[:, r] * ly, s[:, r] * lx + c[:, r] * ly   # wheel offset in world
+                vx = v[:, 0] - st.omega[:, r] * oy - st.wheel_w[:, r, w] * p.wheel_r[:, r] * c[:, r]
+                vy = v[:, 1] + st.omega[:, r] * ox - st.wheel_w[:, r, w] * p.wheel_r[:, r] * s[:, r]
+                slip = torch.sqrt(vx * vx + vy * vy)
+                self.m_friction[:, self.wheel_geom_lr[r][w], 0] = p.tire_mu[:, r] * (
+                    k[:, r] + (1 - k[:, r]) * torch.exp(-slip / self.slide_vel))
+
     def readings(self) -> dict[str, torch.Tensor]:
         r = self.sensors.read(self.ctrl_dt)  # one history slot per control tick
         r.update(self.sensors.motion(self.state, self.prev_vel, self.ctrl_dt))
-        return r
+        return {k: v.nan_to_num(0.0, 0.0, 0.0) if v.is_floating_point() else v for k, v in r.items()}
 
     def step(self, action: torch.Tensor) -> tuple[dict[str, torch.Tensor], torch.Tensor, torch.Tensor]:
         """action [N,R,2] in [-1, 1] → (readings, done [N], winner [N]: 0/1 or DRAW). No auto-reset."""
@@ -347,6 +391,7 @@ class SumoEnv3D:
         for r in range(physics.N_ROBOTS):
             self.ctrl[:, self.motor[r]] = drive[:, r]
             self.m_damping[:, self.wheel_dadr[r]] = locked[:, r]
+        self._tire_friction()
         self.prev_vel.copy_(st.vel)
         prev_pos = st.pos.clone()
         self._to_warp()
@@ -359,13 +404,16 @@ class SumoEnv3D:
         else:
             self._substeps()
         self._to_torch()
-        # Safety net: a diverged world (seen only after a robot has fallen off and keeps tumbling, i.e. in finished
-        # matches) must not leak NaN into obs/rewards: it ends as a draw and is reset by the caller.
+        # Safety net: a diverged world (rare) must not leak NaN into obs/rewards: it ends as a draw and is reset by
+        # the caller. The poses derived from qpos (xpos/xipos/xquat) are cleaned too: the state and the sensors read
+        # them, and one NaN frame in the frame history or the obs normalizer used to take the whole run down.
         bad = ~torch.isfinite(self.qpos).all(1) | ~torch.isfinite(self.qvel).all(1)
-        self.qpos.nan_to_num_(0.0, 0.0, 0.0)
-        self.qvel.nan_to_num_(0.0, 0.0, 0.0)
+        for x in (self.qpos, self.qvel, self.xpos, self.xipos, self.xquat):
+            x.nan_to_num_(0.0, 0.0, 0.0)
         self.n_diverged += bad
         self._refresh_state(prev_pos)
+        for x in (st.pos, st.vel, st.theta, st.omega, st.wheel_w, st.wedge, st.lift):
+            x.nan_to_num_(0.0, 0.0, 0.0)
         self.sensors.push3d()
         self.t += self.ctrl_dt
 

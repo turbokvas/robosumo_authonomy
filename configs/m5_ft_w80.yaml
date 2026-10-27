@@ -1,0 +1,64 @@
+# M5 fine-tune test (INTERFACE_AND_M5.md §3.5): wheels Ø70 → Ø80 mm, outside the trained range (Ø70 fixed),
+# fine-tuned from the final M5 policy. Compare with configs/m5_scratch_w80.yaml at the same step budget.
+
+run_name: m5_ft_w80
+seed: 1
+init_ckpt: results/m5/ckpt_final.pt   # final M5 policy: 600M of runs/m5_robust_3d_20261027_013626
+spec_overrides:
+  - robot.drive.wheel_diameter=0.080
+
+env:
+  sim: 3d                          # MuJoCo Warp (sim3d/env3d.py)
+  num_envs: 16384                  # 4096 was launch-bound (16 ms/step); 4x envs ≈ 2.2x rollout throughput
+  randomize: true                  # M5: every *_rand range of the spec
+  sensor_dropout:                  # імовірність, що резервна група сенсорів відсутня в матчі (interface v1)
+    bare: 0.5                      # імовірність матчу зовсім без резервних сенсорів (як теперішнє залізо)
+    side_ir: 0.5
+    encoders: 0.5
+    imu: 0.5
+
+reward:                            # shaping off: the draws were the tire model (see PROGRESS.md), not the reward
+  win: 10.0
+  loss: -10.0
+  draw: -4.0                       # 3D plateaued at ~30% clinch draws; owner's rule: −4 if no progress
+  approach: 0.0
+  push: 0.0
+  push_gate_dist: 0.3
+  jerk: 0.02
+  shaping_anneal_steps: 1
+
+ppo:
+  total_steps: 300_000_000
+  rollout: 32                      # batch 16384×32 = 524k samples per update
+  gamma: 0.995
+  gae_lambda: 0.95
+  lr: 1.5e-4
+  epochs: 3                        # big batch: fewer passes, update time stays below rollout time
+  minibatches: 8
+  clip: 0.2
+  ent_coef: 0.002
+  vf_coef: 0.5
+  max_grad_norm: 1.0
+  init_log_std: -1.5               # pretrained actor: start with little exploration noise
+  critic_hidden: [256, 256]
+  critic_warmup_updates: 10        # critic from the 2D checkpoint (same layout), short warm-up for 3D
+
+league:
+  pool_size: 32                    # frozen snapshots kept (the anchors are never overwritten)
+  anchors: 1                       # recomputed: initial policy + anchor_checkpoints
+  anchor_checkpoints:              # different styles from run 1's cycle (each beats some of the others)
+    - results/m4/ckpt_02000M.pt         # best 2D league policy
+    - results/m3/ckpt_00500M_v2.pt
+    - results/m4_run1/ckpt_02700M_v2.pt
+  anchor_share: 0.35               # share of episodes against the anchors
+  snapshot_steps: 50_000_000
+  fixed_share: 0.25                # share of episodes against stationary + FSMs, so old skills stay
+  pfsp_power: 2.0                  # weight ∝ (1 − win_rate)^p: focus on opponents we lose to
+  pfsp_floor: 0.02                 # keep a little weight on opponents already beaten
+  win_ema: 0.01                    # per-episode EMA rate for the win-rate estimates
+
+eval:
+  every_steps: 50_000_000
+  matches: 1024
+  video_matches: 6
+  video_every_evals: 6             # rendering is CPU-bound, ~1-2 min each
