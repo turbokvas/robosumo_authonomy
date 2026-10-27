@@ -371,7 +371,7 @@ class SumoEnv3D:
     def readings(self) -> dict[str, torch.Tensor]:
         r = self.sensors.read(self.ctrl_dt)  # one history slot per control tick
         r.update(self.sensors.motion(self.state, self.prev_vel, self.ctrl_dt))
-        return r
+        return {k: v.nan_to_num(0.0, 0.0, 0.0) if v.is_floating_point() else v for k, v in r.items()}
 
     def step(self, action: torch.Tensor) -> tuple[dict[str, torch.Tensor], torch.Tensor, torch.Tensor]:
         """action [N,R,2] in [-1, 1] → (readings, done [N], winner [N]: 0/1 or DRAW). No auto-reset."""
@@ -404,13 +404,16 @@ class SumoEnv3D:
         else:
             self._substeps()
         self._to_torch()
-        # Safety net: a diverged world (seen only after a robot has fallen off and keeps tumbling, i.e. in finished
-        # matches) must not leak NaN into obs/rewards: it ends as a draw and is reset by the caller.
+        # Safety net: a diverged world (rare) must not leak NaN into obs/rewards: it ends as a draw and is reset by
+        # the caller. The poses derived from qpos (xpos/xipos/xquat) are cleaned too: the state and the sensors read
+        # them, and one NaN frame in the frame history or the obs normalizer used to take the whole run down.
         bad = ~torch.isfinite(self.qpos).all(1) | ~torch.isfinite(self.qvel).all(1)
-        self.qpos.nan_to_num_(0.0, 0.0, 0.0)
-        self.qvel.nan_to_num_(0.0, 0.0, 0.0)
+        for x in (self.qpos, self.qvel, self.xpos, self.xipos, self.xquat):
+            x.nan_to_num_(0.0, 0.0, 0.0)
         self.n_diverged += bad
         self._refresh_state(prev_pos)
+        for x in (st.pos, st.vel, st.theta, st.omega, st.wheel_w, st.wedge, st.lift):
+            x.nan_to_num_(0.0, 0.0, 0.0)
         self.sensors.push3d()
         self.t += self.ctrl_dt
 

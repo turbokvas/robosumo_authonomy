@@ -1,0 +1,60 @@
+# M5 fine-tune test, baseline: the same Ø80 mm wheels and step budget as configs/m5_ft_w80.yaml, trained from
+# scratch with the M3 recipe (curriculum stationary → walker → all FSM, approach/push shaping) in 3D with the M5
+# randomization. Speed settings as in M4/M5 (16384 envs, rollout 32, 3 epochs).
+
+run_name: m5_scratch_w80
+seed: 1
+spec_overrides:
+  - robot.drive.wheel_diameter=0.080
+
+env:
+  sim: 3d
+  num_envs: 16384
+  randomize: true
+  sensor_dropout:
+    bare: 0.5
+    side_ir: 0.5
+    encoders: 0.5
+    imu: 0.5
+
+reward:
+  win: 10.0
+  loss: -10.0
+  draw: -4.0
+  approach: 1.0
+  push: 3.0
+  push_gate_dist: 0.3
+  jerk: 0.02
+  shaping_anneal_steps: 200_000_000
+
+ppo:
+  total_steps: 300_000_000
+  rollout: 32
+  gamma: 0.995
+  gae_lambda: 0.95
+  lr: 3.0e-4
+  epochs: 3
+  minibatches: 8
+  clip: 0.2
+  ent_coef: 0.002
+  vf_coef: 0.5
+  max_grad_norm: 1.0
+  init_log_std: -0.5
+  critic_hidden: [256, 256]
+
+curriculum:
+  promote_win_rate: 0.8
+  window: 4096
+  stages:
+    - name: stationary
+      opponents: {stationary: 1.0}
+    - name: walker
+      opponents: {stationary: 0.2, random_walker: 0.8}
+    - name: all_fsm
+      opponents: {stationary: 0.05, random_walker: 0.15, aggressive: 0.3, cautious_edge_waiter: 0.2, spinner: 0.3}
+
+eval:
+  every_steps: 50_000_000
+  matches: 1024
+  video_matches: 6
+  video_every_evals: 6

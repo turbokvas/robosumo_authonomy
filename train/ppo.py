@@ -24,7 +24,7 @@ import yaml
 from torch.utils.tensorboard import SummaryWriter
 
 from sumo import interface as iface
-from sumo.config import SPEC_PATH, get, load_spec
+from sumo.config import apply_overrides, get, load_spec
 from sumo.env import DRAW, SumoTask
 from train.eval import evaluate_many, video
 from train.league import League, PolicyPool
@@ -85,7 +85,9 @@ def main() -> None:
         cfg = ckpt["cfg"]
     else:
         ap.error("--config or --resume is required")
-    spec = load_spec()  # always the current spec: it has to match the current sim code
+    # always the current spec (it has to match the current sim code), plus the config's spec_overrides
+    # (e.g. the M5 fine-tune test: a hardware value outside the trained ranges)
+    spec = apply_overrides(load_spec(), cfg.get("spec_overrides", []))
     if ckpt and ckpt["spec"] != spec:
         print("note: robot_spec.yaml changed since this checkpoint was written; continuing with the current one")
     pc, rc, cc, ec = cfg["ppo"], cfg["reward"], cfg.get("curriculum"), cfg["eval"]
@@ -102,7 +104,7 @@ def main() -> None:
         run_dir = ROOT / "runs" / f"{cfg['run_name']}_{time.strftime('%Y%m%d_%H%M%S')}"
         run_dir.mkdir(parents=True)
         shutil.copy(args.config, run_dir / "config.yaml")
-        shutil.copy(SPEC_PATH, run_dir / "robot_spec.yaml")
+        (run_dir / "robot_spec.yaml").write_text(yaml.safe_dump(spec, sort_keys=False, allow_unicode=True), encoding="utf-8")
         (run_dir / "git_hash.txt").write_text(commit + "\n")
     writer = SummaryWriter(str(run_dir))
     print(f"run: {run_dir}  (git {commit})")
@@ -237,6 +239,12 @@ def main() -> None:
 
         flat = {k: v.flatten(0, 1) for k, v in buf.items()}
         flat_adv, flat_ret = adv.flatten(), ret.flatten()
+        # last line of defence: a non-finite sample would poison the normalizers and the weights for good
+        n_bad = sum(int((~torch.isfinite(v)).sum()) for v in (*flat.values(), flat_adv, flat_ret))
+        if n_bad:
+            print(f"[{step:,}] warning: {n_bad} non-finite values in the batch, zeroed", flush=True)
+            for v in (*flat.values(), flat_adv, flat_ret):
+                v.nan_to_num_(0.0, 0.0, 0.0)
         batch = T * n
         mb = batch // pc["minibatches"]
         for _ in range(pc["epochs"]):
