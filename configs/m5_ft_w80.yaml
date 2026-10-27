@@ -3,7 +3,7 @@
 
 run_name: m5_ft_w80
 seed: 1
-init_ckpt: results/m5/ckpt_final.pt   # TODO: the final M5 checkpoint (600M of runs/m5_robust_3d_20261027_013626), copy it here
+init_ckpt: results/m5/ckpt_final.pt   # final M5 policy: 600M of runs/m5_robust_3d_20261027_013626
 spec_overrides:
   - robot.drive.wheel_diameter=0.080
 
