@@ -11,6 +11,7 @@ One match per env, deterministic actions (mean).
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import math
 import sys
@@ -82,6 +83,12 @@ def evaluate(
 
 
 @torch.no_grad()
+def _free_gpu() -> None:
+    """Hand torch's cached blocks back before/after building an eval env next to the training one."""
+    gc.collect()
+    torch.cuda.empty_cache()
+
+
 def evaluate_many(
     actor: Actor,
     spec: dict[str, Any],
@@ -92,9 +99,22 @@ def evaluate_many(
     pool: PolicyPool | None = None,
     seed: int = 4242,
     sensors: str = "installed",
+    max_envs: int = 2048,
 ) -> dict[str, dict[str, float]]:
-    """`matches` first episodes against each of `opponents`, all in one batch → {name: {win, loss, draw}}."""
+    """`matches` first episodes against each of `opponents` → {name: {win, loss, draw}}. Opponents are batched
+    together up to max_envs worlds: an eval env sits next to the training env on an 8 GB card (M5 ran out of
+    memory at a 9216-world 3D eval)."""
+    per = max(1, max_envs // matches)
+    if len(opponents) > per:
+        out = {}
+        for i in range(0, len(opponents), per):
+            out.update(evaluate_many(actor, spec, cfg, opponents[i:i + per], matches, device, pool, seed + i, sensors,
+                                     max_envs))
+        return out
     n = matches * len(opponents)
+    # a second (3D) env next to the training one: hand cached blocks back first, or the two allocators (torch,
+    # Warp) can run an 8 GB card out of memory (M5 died this way at its 400M eval)
+    _free_gpu()
     task = SumoTask(spec, cfg, n, device, seed, pool=pool, sensors=sensors)
     types = torch.tensor([task.opp_names.index(o) for o in opponents], device=device).repeat_interleave(matches)
     task.opp_type.copy_(types)
@@ -110,6 +130,8 @@ def evaluate_many(
         r = result[i * matches:(i + 1) * matches]
         out[name] = {"win": (r == 0).float().mean().item(), "loss": (r == 1).float().mean().item(),
                      "draw": (r == DRAW).float().mean().item()}
+    del task
+    _free_gpu()
     return out
 
 
